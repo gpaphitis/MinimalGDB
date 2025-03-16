@@ -24,7 +24,7 @@
     } while (0)
 
 
-#define BREAKPOINT_ADDR 0x00000000004005da
+#define BREAKPOINT_ADDR 0x0000000000401159
 
 void process_inspect(int pid) {
     struct user_regs_struct regs;

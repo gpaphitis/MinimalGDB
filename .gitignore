@@ -1,3 +1,6 @@
 *.out
 .vscode/*
 *.txt
+breakpoint
+min_gdb
+my_gdb

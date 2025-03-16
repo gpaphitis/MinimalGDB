@@ -6,7 +6,7 @@
 typedef struct
 {
    long address;
-   char original_opcode;
+   long previous_code;
 } breakpoint_t;
 
 typedef struct node
@@ -20,5 +20,14 @@ typedef struct
    node_t *head;
    int size;
 } list_t;
+
+list_t *list_init();
+void add_breakpoint(list_t *list, long address, long previous_code);
+void delete_breakpoint(list_t *list, int index);
+breakpoint_t *get_breakpoint(list_t *list, int index);
+breakpoint_t *get_breakpoint_by_address(list_t *list, long address);
+void clear_breakpoints(list_t *list);
+void list_destroy(list_t *list);
+void print_list(list_t *list);
 
 #endif

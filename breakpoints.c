@@ -1,6 +1,6 @@
 #include "breakpoints.h"
 
-list_t *init()
+list_t *list_init()
 {
    list_t *list = malloc(sizeof(list_t));
    list->head = NULL;
@@ -10,16 +10,16 @@ list_t *init()
 
 void print_breakpoint(breakpoint_t *breakpoint)
 {
-   printf("Address: %ld\tOpcode: %d\n", breakpoint->address, breakpoint->original_opcode);
+   printf("Address: %ld\tPrevious code: %ld\n", breakpoint->address, breakpoint->previous_code);
 }
 
-void add_breakpoint(list_t *list, long address, char opcode)
+void add_breakpoint(list_t *list, long address, long previous_code)
 {
    breakpoint_t *breakpoint = malloc(sizeof(breakpoint_t));
    if (breakpoint == NULL)
       perror("malloc() error for breakpoint_t in add_breakpoint()");
    breakpoint->address = address;
-   breakpoint->original_opcode = opcode;
+   breakpoint->previous_code = previous_code;
    node_t *new_node = malloc(sizeof(node_t));
    if (new_node == NULL)
       perror("malloc() error for node_t in add_breakpoint()");
@@ -69,6 +69,15 @@ breakpoint_t *get_breakpoint(list_t *list, int index)
    }
    return target->breakpoint;
 }
+breakpoint_t *get_breakpoint_by_address(list_t *list, long address)
+{
+   if (address < 0 || list->head == NULL)
+      return NULL;
+   node_t *target = list->head;
+   for (; target != NULL && target->breakpoint->address != address; target = target->next)
+      ;
+   return (target != NULL) ? target->breakpoint : NULL;
+}
 
 void clear_breakpoint(node_t *current)
 {
@@ -88,7 +97,7 @@ void clear_breakpoints(list_t *list)
    return;
 }
 
-void destroy(list_t *list)
+void list_destroy(list_t *list)
 {
    clear_breakpoints(list);
    free(list);
@@ -113,12 +122,12 @@ void print_list(list_t *list)
 #ifdef DEBUG
 int main()
 {
-   list_t *list = init();
+   list_t *list = list_init();
    add_breakpoint(list, 100, (char)10);
    add_breakpoint(list, 200, (char)20);
    add_breakpoint(list, 300, (char)30);
    print_list(list);
-   destroy(list);
+   list_destroy(list);
    return 0;
 }
 #endif
