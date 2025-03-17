@@ -78,7 +78,7 @@ void print_ins(cs_insn *ins)
     fprintf(stderr, "0x%016lx:\t%s\t\t%s\n", ins->address, ins->mnemonic, ins->op_str);
 }
 
-void disas(csh handle, const unsigned char *buffer, unsigned int size)
+void disas(csh handle, const unsigned char *buffer, unsigned int size, breakpoint_t *breakpoint)
 {
     cs_insn *insn;
     size_t count;
@@ -90,7 +90,9 @@ void disas(csh handle, const unsigned char *buffer, unsigned int size)
         size_t j;
         for (j = 0; j < count; j++)
         {
-            fprintf(stderr, "0x%" PRIx64 ":\t%s\t\t%s\n", insn[j].address, insn[j].mnemonic,
+            if (j == 0)
+                fprintf(stderr, "=>");
+            fprintf(stderr, "0x%" PRIx64 ":\t%s\t\t%s\n", breakpoint->address + insn[j].address, insn[j].mnemonic,
                     insn[j].op_str);
         }
         cs_free(insn, count);
@@ -99,18 +101,18 @@ void disas(csh handle, const unsigned char *buffer, unsigned int size)
         fprintf(stderr, "ERROR: Failed to disassemble given code!\n");
 }
 
-void process_inspect(int pid, struct user_regs_struct *regs, long address)
+void process_inspect(int pid, struct user_regs_struct *regs, breakpoint_t *breakpoint)
 {
     long current_ins = ptrace(PTRACE_PEEKDATA, pid, regs->rip, 0);
     if (current_ins == -1)
         die("(peekdata) %s", strerror(errno));
-    fprintf(stderr, "=> 0x%llx: 0x%lx\n", regs->rip, current_ins);
+    // fprintf(stderr, "=> 0x%llx: 0x%lx\n", regs->rip, current_ins);
     unsigned char *buffer = malloc(MAX_INSN_SIZE * 11);
     size_t bytes_read = 0;
     while (bytes_read < MAX_INSN_SIZE * 11)
     {
         // Read a word (sizeof(long)) from the child process memory
-        long word = ptrace(PTRACE_PEEKDATA, pid, address + bytes_read, NULL);
+        long word = ptrace(PTRACE_PEEKDATA, pid, breakpoint->address + bytes_read, NULL);
         if (word == -1 && errno != 0)
         {
             free(buffer);
@@ -125,7 +127,7 @@ void process_inspect(int pid, struct user_regs_struct *regs, long address)
 
         bytes_read += sizeof(word);
     }
-    disas(handle, (const unsigned char *)buffer, bytes_read);
+    disas(handle, (const unsigned char *)buffer, bytes_read, breakpoint);
 }
 
 long set_breakpoint(int pid, long addr)
@@ -162,8 +164,6 @@ void serve_breakpoint(int pid)
     if (ptrace(PTRACE_GETREGS, pid, 0, &regs) == -1)
         die("(getregs) %s", strerror(errno));
 
-    getchar();
-
     fprintf(stderr, "Resuming.\n");
 
     breakpoint_t *breakpoint = get_breakpoint_by_address(breakpoints, regs.rip - 1);
@@ -172,7 +172,21 @@ void serve_breakpoint(int pid)
     regs.rip = breakpoint->address;
     if (ptrace(PTRACE_SETREGS, pid, 0, &regs) == -1)
         die("(setregs) %s", strerror(errno));
-    process_inspect(pid, &regs, breakpoint->address);
+    process_inspect(pid, &regs, breakpoint);
+}
+
+void delete_breakpoint(pid_t pid, int index)
+{
+    breakpoint_t *breakpoint = get_breakpoint(breakpoints, index);
+    if (ptrace(PTRACE_POKEDATA, pid, (void *)breakpoint->address, (void *)breakpoint->previous_code) == -1)
+        die("(pokedata) %s", strerror(errno));
+    remove_breakpoint(breakpoints, index);
+}
+void clear_breakpopints(pid_t pid)
+{
+    int total = get_num_breakpoints(breakpoints);
+    for (int i = 0; i < total; i++)
+        delete_breakpoint(pid, i);
 }
 
 int check_if_breakpoint(pid_t pid, struct user_regs_struct *regs)
@@ -217,20 +231,26 @@ int execute(pid_t pid)
     }
 }
 
-char get_command()
+char *get_command()
 {
-    char command = 0;
-    scanf("%c", &command);
-    // Clear whitespace from stdin
-    while (command == ' ' || command == '\n' || command == '\t' || command == '\r')
-        scanf("%c", &command);
-    return command;
+    char *input = malloc(60 * sizeof(char));
+    if (fgets(input, 60 * sizeof(char), stdin) == NULL)
+    {
+        printf("Error reading input.\n");
+        return NULL;
+    }
+    size_t len = strlen(input);
+    if (len > 0 && input[len - 1] == '\n')
+    {
+        input[len - 1] = '\0';
+    }
+    return input;
 }
 
 int main(int argc, char **argv)
 {
     if (argc <= 1)
-        die("min_strace <program>: %d", argc);
+        die("my_gdb <program>: %d", argc);
     if (elf_version(EV_CURRENT) == EV_NONE)
         die("(version) %s", elf_errmsg(-1));
 
@@ -262,22 +282,47 @@ int main(int argc, char **argv)
     ptrace(PTRACE_SETOPTIONS, pid, 0, PTRACE_O_EXITKILL);
 
     breakpoints = list_init();
-    char command;
+    char *command = NULL;
     while (1)
     {
         printf("(paphitisdb) ");
-        command = get_command();
-        switch (command)
-        {
-        case 'r':
+        command = get_command(command);
+        char *token = strtok(command, " ");
+        if (!strcmp(token, "r"))
             execute(pid);
-            break;
-        case 'b':
-            long address = 0;
-            scanf("%lx", &address);
+        else if (!strcmp(token, "c"))
+            execute(pid);
+        else if (!strcmp(token, "b"))
+        {
+            token = strtok(NULL, " "); // Get the next token
+            printf("token: %s\n", token);
+            long address = (long)strtol(token, NULL, 16);
             set_breakpoint(pid, address);
-            break;
         }
+        else if (!strcmp(token, "p"))
+            print_list(breakpoints);
+        else if (!strcmp(token, "del"))
+        {
+            token = strtok(NULL, " "); // Get the next token
+            if (token == NULL)
+                clear_breakpopints(pid);
+            else
+            {
+                int index = (int)strtol(token, NULL, 10);
+                delete_breakpoint(pid, index);
+            }
+        }
+        else
+        {
+            printf(
+                "Commands:\n"
+                "b <address>\tSets breakpoint\n"
+                "p\t\t\tPrints list of set breakpoints\n"
+                "r\t\t\tChild (re)starts execution\n"
+                "c\t\t\tChild continues execution\n"
+                "del [index]\tDelete breakpoint at index, if not defined deletes all\n");
+        }
+        free(command);
     }
     list_destroy(breakpoints);
     cs_close(&handle);
