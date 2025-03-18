@@ -158,12 +158,12 @@ void disas(csh handle, const unsigned char *buffer, unsigned int size, breakpoin
         for (j = 0; j < count; j++)
         {
             if (j == 0)
-                fprintf(stderr, "=>");
+                fprintf(stderr, "=> ");
             char *symbol = get_symbol(breakpoint->address + insn[j].address);
             if (symbol == NULL)
-                fprintf(stderr, "0x%" PRIx64 ":\t", breakpoint->address + insn[j].address);
+                fprintf(stderr, "\x1b[34m0x%" PRIx64 "\x1b[0m:\t", breakpoint->address + insn[j].address);
             else
-                fprintf(stderr, "%s :\t", symbol);
+                fprintf(stderr, "\x1b[33m%s\x1b[0m :\t", symbol);
             fprintf(stderr, "%s\t\t%s\n", insn[j].mnemonic,
                     insn[j].op_str);
         }
@@ -202,30 +202,35 @@ void process_inspect(int pid, struct user_regs_struct *regs, breakpoint_t *break
     disas(handle, (const unsigned char *)buffer, bytes_read, breakpoint);
 }
 
-long set_breakpoint(int pid, long addr)
+void set_breakpoint(int pid, long addr, const char *symbol)
 {
     /* Backup current code.  */
     long previous_code = 0;
     previous_code = ptrace(PTRACE_PEEKDATA, pid, (void *)addr, 0);
     if (previous_code == -1)
         die("(peekdata) %s", strerror(errno));
-    add_breakpoint(breakpoints, addr, previous_code);
-
-    fprintf(stderr, "0x%p: 0x%lx\n", (void *)addr, previous_code);
-
-    /* Insert the breakpoint. */
-    long trap = (previous_code & 0xFFFFFFFFFFFFFF00) | 0xCC;
-    if (ptrace(PTRACE_POKEDATA, pid, (void *)addr, (void *)trap) == -1)
-        die("(pokedata) %s", strerror(errno));
-
-    return previous_code;
+    // If symbol not given, try and find it
+    symbol = (symbol != NULL) ? symbol : get_symbol(addr);
+    int index = add_breakpoint(breakpoints, addr, previous_code, symbol);
+    if (index >= 0)
+    {
+        fprintf(stderr, "Breakpoint %d at \x1b[34m0x%lx\x1b[0m", index, addr);
+        if (symbol != NULL)
+            fprintf(stderr, " \x1b[33m<%s>\x1b[0m", symbol);
+        fprintf(stderr, "\n");
+        /* Insert the breakpoint. */
+        long trap = (previous_code & 0xFFFFFFFFFFFFFF00) | 0xCC;
+        if (ptrace(PTRACE_POKEDATA, pid, (void *)addr, (void *)trap) == -1)
+            die("(pokedata) %s", strerror(errno));
+    }
 }
-long set_symbol_breakpoint(int pid, const char *symbol)
+int set_symbol_breakpoint(int pid, const char *symbol)
 {
     long addr = get_symbol_value(symbol);
     if (addr == -1)
         return -1;
-    return set_breakpoint(pid, addr);
+    set_breakpoint(pid, addr, symbol);
+    return 0;
 }
 
 void process_step(int pid)
@@ -397,12 +402,12 @@ int main(int argc, char **argv)
             {
                 token = strtok(token, "*");
                 address = (long)strtol(token, NULL, 16);
-                set_breakpoint(pid, address);
+                set_breakpoint(pid, address, NULL);
             }
             else
             {
                 if (set_symbol_breakpoint(pid, token) == -1)
-                    printf("Symbol not found");
+                    printf("Symbol not found\n");
             }
         }
         else if (!strcmp(token, "l"))

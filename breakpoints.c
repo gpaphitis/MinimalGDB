@@ -8,15 +8,23 @@ list_t *list_init()
    return list;
 }
 
-void add_breakpoint(list_t *list, long address, long previous_code)
+int add_breakpoint(list_t *list, long address, long previous_code, const char *symbol)
 {
    if (get_breakpoint_by_address(list, address) != NULL)
-      return;
+      return -1;
    breakpoint_t *breakpoint = malloc(sizeof(breakpoint_t));
    if (breakpoint == NULL)
       perror("malloc() error for breakpoint_t in add_breakpoint()");
    breakpoint->address = address;
    breakpoint->previous_code = previous_code;
+   breakpoint->symbol = NULL;
+   if (symbol != NULL)
+   {
+      breakpoint->symbol = malloc(strlen(symbol) + 1);
+      if (breakpoint->symbol == NULL)
+         perror("malloc() error for node_t in add_breakpoint()");
+      strncpy(breakpoint->symbol, symbol, strlen(symbol) + 1);
+   }
    node_t *new_node = malloc(sizeof(node_t));
    if (new_node == NULL)
       perror("malloc() error for node_t in add_breakpoint()");
@@ -26,14 +34,14 @@ void add_breakpoint(list_t *list, long address, long previous_code)
    {
       list->head = new_node;
       list->size = 1;
-      return;
+      return 0;
    }
    node_t *last_node = list->head;
    for (; last_node->next != NULL; last_node = last_node->next)
       ;
    last_node->next = new_node;
    list->size++;
-   return;
+   return list->size - 1;
 }
 
 void remove_breakpoint(list_t *list, int index)
@@ -111,7 +119,8 @@ void print_list(list_t *list)
    printf("Num\tAddress\t\tSymbol\n");
    for (node_t *node = list->head; node != NULL; node = node->next)
    {
-      printf("%d\t0x%lx\t%s\n", i, node->breakpoint->address, "No symbols available yet");
+      printf("%d\t\x1b[34m0x%lx\x1b[0m\t%s\n", i, node->breakpoint->address,
+             node->breakpoint->symbol == NULL ? "" : node->breakpoint->symbol);
       i++;
    }
 }

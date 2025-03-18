@@ -2,11 +2,13 @@
 #define BREAKPOINTS_H
 #include <stdlib.h>
 #include <stdio.h>
+#include <string.h>
 
 typedef struct
 {
    long address;
    long previous_code;
+   char *symbol;
 } breakpoint_t;
 
 typedef struct node
@@ -22,7 +24,7 @@ typedef struct
 } list_t;
 
 list_t *list_init();
-void add_breakpoint(list_t *list, long address, long previous_code);
+int add_breakpoint(list_t *list, long address, long previous_code, const char *symbol);
 void remove_breakpoint(list_t *list, int index);
 breakpoint_t *get_breakpoint(list_t *list, int index);
 breakpoint_t *get_breakpoint_by_address(list_t *list, long address);
