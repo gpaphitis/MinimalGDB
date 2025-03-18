@@ -40,6 +40,13 @@ list_t *breakpoints;
 csh handle;
 Elf *elf;
 
+enum child_state_t
+{
+    LOADED,
+    EXECUTING,
+    EXITED
+} child_state;
+
 Elf_Data *find_text(long unsigned *text_start, long unsigned *text_end)
 {
     Elf_Scn *scn = NULL;
@@ -71,6 +78,66 @@ Elf_Data *find_text(long unsigned *text_start, long unsigned *text_end)
     }
     return NULL;
 }
+char *get_symbol(long address)
+{
+    Elf_Scn *scn = NULL;
+    GElf_Shdr shdr;
+    size_t shstrndx;
+    Elf_Data *data;
+    int count = 0;
+    if (elf_getshdrstrndx(elf, &shstrndx) != 0)
+        die("(getshdrstrndx) %s", elf_errmsg(-1));
+    while ((scn = elf_nextscn(elf, scn)) != NULL)
+    {
+        if (gelf_getshdr(scn, &shdr) != &shdr)
+            die("(getshdr) %s", elf_errmsg(-1));
+        /* Locate symbol table.  */
+        if (!strcmp(elf_strptr(elf, shstrndx, shdr.sh_name), ".symtab"))
+        {
+            data = elf_getdata(scn, NULL);
+            count = shdr.sh_size / shdr.sh_entsize;
+
+            for (int i = 0; i < count; ++i)
+            {
+                GElf_Sym sym;
+                gelf_getsym(data, i, &sym);
+                if (address == sym.st_value)
+                    return elf_strptr(elf, shdr.sh_link, sym.st_name);
+            }
+        }
+    }
+    return NULL;
+}
+long get_symbol_value(const char *symbol)
+{
+    Elf_Scn *scn = NULL;
+    GElf_Shdr shdr;
+    size_t shstrndx;
+    Elf_Data *data;
+    int count = 0;
+    if (elf_getshdrstrndx(elf, &shstrndx) != 0)
+        die("(getshdrstrndx) %s", elf_errmsg(-1));
+    while ((scn = elf_nextscn(elf, scn)) != NULL)
+    {
+        if (gelf_getshdr(scn, &shdr) != &shdr)
+            die("(getshdr) %s", elf_errmsg(-1));
+        /* Locate symbol table.  */
+        if (!strcmp(elf_strptr(elf, shstrndx, shdr.sh_name), ".symtab"))
+        {
+            data = elf_getdata(scn, NULL);
+            count = shdr.sh_size / shdr.sh_entsize;
+
+            for (int i = 0; i < count; ++i)
+            {
+                GElf_Sym sym;
+                gelf_getsym(data, i, &sym);
+                if (!strcmp(symbol, elf_strptr(elf, shdr.sh_link, sym.st_name)))
+                    return sym.st_value;
+            }
+        }
+    }
+    return -1;
+}
 
 void print_ins(cs_insn *ins)
 {
@@ -92,7 +159,12 @@ void disas(csh handle, const unsigned char *buffer, unsigned int size, breakpoin
         {
             if (j == 0)
                 fprintf(stderr, "=>");
-            fprintf(stderr, "0x%" PRIx64 ":\t%s\t\t%s\n", breakpoint->address + insn[j].address, insn[j].mnemonic,
+            char *symbol = get_symbol(breakpoint->address + insn[j].address);
+            if (symbol == NULL)
+                fprintf(stderr, "0x%" PRIx64 ":\t", breakpoint->address + insn[j].address);
+            else
+                fprintf(stderr, "%s :\t", symbol);
+            fprintf(stderr, "%s\t\t%s\n", insn[j].mnemonic,
                     insn[j].op_str);
         }
         cs_free(insn, count);
@@ -147,6 +219,13 @@ long set_breakpoint(int pid, long addr)
         die("(pokedata) %s", strerror(errno));
 
     return previous_code;
+}
+long set_symbol_breakpoint(int pid, const char *symbol)
+{
+    long addr = get_symbol_value(symbol);
+    if (addr == -1)
+        return -1;
+    return set_breakpoint(pid, addr);
 }
 
 void process_step(int pid)
@@ -276,6 +355,7 @@ int main(int argc, char **argv)
         execvp(argv[1], argv + 1);
         die("%s", strerror(errno));
     }
+    child_state = LOADED;
 
     // Wait for execvp()
     waitpid(pid, 0, 0);
@@ -289,19 +369,45 @@ int main(int argc, char **argv)
         command = get_command(command);
         char *token = strtok(command, " ");
         if (!strcmp(token, "r"))
-            execute(pid);
+        {
+            if (child_state == LOADED)
+            {
+                if (execute(pid) == CHILD_EXIT)
+                    child_state = EXITED;
+                child_state = EXECUTING;
+            }
+            else
+                printf("Program is executing or has finished\n");
+        }
         else if (!strcmp(token, "c"))
-            execute(pid);
+        {
+            if (child_state != EXECUTING)
+                printf("Program has not started or has finished\n");
+            else
+            {
+                if (execute(pid) == CHILD_EXIT)
+                    child_state = EXITED;
+            }
+        }
         else if (!strcmp(token, "b"))
         {
             token = strtok(NULL, " "); // Get the next token
-            printf("token: %s\n", token);
-            long address = (long)strtol(token, NULL, 16);
-            set_breakpoint(pid, address);
+            long address = 0;
+            if (token[0] == '*')
+            {
+                token = strtok(token, "*");
+                address = (long)strtol(token, NULL, 16);
+                set_breakpoint(pid, address);
+            }
+            else
+            {
+                if (set_symbol_breakpoint(pid, token) == -1)
+                    printf("Symbol not found");
+            }
         }
-        else if (!strcmp(token, "p"))
+        else if (!strcmp(token, "l"))
             print_list(breakpoints);
-        else if (!strcmp(token, "del"))
+        else if (!strcmp(token, "d"))
         {
             token = strtok(NULL, " "); // Get the next token
             if (token == NULL)
@@ -316,11 +422,11 @@ int main(int argc, char **argv)
         {
             printf(
                 "Commands:\n"
-                "b <address>\tSets breakpoint\n"
-                "p\t\t\tPrints list of set breakpoints\n"
+                "b *<address>/<symbol>\tSets breakpoint\n"
+                "l\t\t\tPrints list of set breakpoints\n"
                 "r\t\t\tChild (re)starts execution\n"
                 "c\t\t\tChild continues execution\n"
-                "del [index]\tDelete breakpoint at index, if not defined deletes all\n");
+                "d [index]\tDelete breakpoint at index, if not defined deletes all\n");
         }
         free(command);
     }
