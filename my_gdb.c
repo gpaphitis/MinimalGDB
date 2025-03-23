@@ -221,6 +221,10 @@ void process_inspect(int pid, struct user_regs_struct *regs, breakpoint_t *break
     long current_ins = ptrace(PTRACE_PEEKDATA, pid, regs->rip, 0);
     if (current_ins == -1)
         die("(peekdata) %s", strerror(errno));
+    fprintf(stderr, "Breakpoint \x1b[34m0x%lx\x1b[0m", breakpoint->address);
+    if (breakpoint->symbol != NULL)
+        fprintf(stderr, " in \x1b[33m%s\x1b[0m", breakpoint->symbol);
+    fprintf(stderr, "\n");
     unsigned char *buffer = NULL;
     size_t bytes_read = get_instruction_buffer(&buffer, pid, breakpoint->address, 11);
     disas(handle, (unsigned char *)buffer, bytes_read, breakpoint->address, 0, 11);
