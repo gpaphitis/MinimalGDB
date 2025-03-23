@@ -7,6 +7,7 @@ void foo(void) {
 int main(int argc, char *argv[]) { 
 
     foo();
+    foo();
 
     return 1;
 }

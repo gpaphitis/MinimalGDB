@@ -145,7 +145,32 @@ void print_ins(cs_insn *ins)
     fprintf(stderr, "0x%016lx:\t%s\t\t%s\n", ins->address, ins->mnemonic, ins->op_str);
 }
 
-void disas(csh handle, const unsigned char *buffer, unsigned int size, breakpoint_t *breakpoint)
+size_t get_instruction_buffer(unsigned char **buffer, pid_t pid, long address, size_t count)
+{
+    *buffer = malloc(MAX_INSN_SIZE * count);
+    size_t bytes_read = 0;
+    while (bytes_read < MAX_INSN_SIZE * count)
+    {
+        // Read a word (sizeof(long)) from the child process memory
+        long word = ptrace(PTRACE_PEEKDATA, pid, address + bytes_read, NULL);
+        if (word == -1 && errno != 0)
+        {
+            free(*buffer);
+            die("(peekdata) %s", strerror(errno));
+        }
+
+        // Copy the word to the buffer byte-by-byte
+        for (size_t i = 0; i < sizeof(word) && bytes_read + i < MAX_INSN_SIZE * 11; i++)
+        {
+            (*buffer)[bytes_read + i] = (word >> (i * 8)) & 0xFF;
+        }
+
+        bytes_read += sizeof(word);
+    }
+    return bytes_read;
+}
+
+void disas(csh handle, const unsigned char *buffer, unsigned int size, long address)
 {
     cs_insn *insn;
     size_t count;
@@ -159,9 +184,9 @@ void disas(csh handle, const unsigned char *buffer, unsigned int size, breakpoin
         {
             if (j == 0)
                 fprintf(stderr, "=> ");
-            char *symbol = get_symbol(breakpoint->address + insn[j].address);
+            char *symbol = get_symbol(address + insn[j].address);
             if (symbol == NULL)
-                fprintf(stderr, "\x1b[34m0x%" PRIx64 "\x1b[0m:\t", breakpoint->address + insn[j].address);
+                fprintf(stderr, "\x1b[34m0x%" PRIx64 "\x1b[0m:\t", address + insn[j].address);
             else
                 fprintf(stderr, "\x1b[33m%s\x1b[0m :\t", symbol);
             fprintf(stderr, "%s\t\t%s\n", insn[j].mnemonic,
@@ -178,28 +203,9 @@ void process_inspect(int pid, struct user_regs_struct *regs, breakpoint_t *break
     long current_ins = ptrace(PTRACE_PEEKDATA, pid, regs->rip, 0);
     if (current_ins == -1)
         die("(peekdata) %s", strerror(errno));
-    // fprintf(stderr, "=> 0x%llx: 0x%lx\n", regs->rip, current_ins);
-    unsigned char *buffer = malloc(MAX_INSN_SIZE * 11);
-    size_t bytes_read = 0;
-    while (bytes_read < MAX_INSN_SIZE * 11)
-    {
-        // Read a word (sizeof(long)) from the child process memory
-        long word = ptrace(PTRACE_PEEKDATA, pid, breakpoint->address + bytes_read, NULL);
-        if (word == -1 && errno != 0)
-        {
-            free(buffer);
-            die("(peekdata) %s", strerror(errno));
-        }
-
-        // Copy the word to the buffer byte-by-byte
-        for (size_t i = 0; i < sizeof(word) && bytes_read + i < MAX_INSN_SIZE * 11; i++)
-        {
-            buffer[bytes_read + i] = (word >> (i * 8)) & 0xFF;
-        }
-
-        bytes_read += sizeof(word);
-    }
-    disas(handle, (const unsigned char *)buffer, bytes_read, breakpoint);
+    unsigned char *buffer = NULL;
+    size_t bytes_read = get_instruction_buffer(&buffer, pid, breakpoint->address, 11);
+    disas(handle, (const unsigned char *)buffer, bytes_read, breakpoint->address);
 }
 
 void set_breakpoint(int pid, long addr, const char *symbol)
@@ -224,6 +230,12 @@ void set_breakpoint(int pid, long addr, const char *symbol)
             die("(pokedata) %s", strerror(errno));
     }
 }
+void reset_breakpoint(int pid, breakpoint_t *breakpoint)
+{
+    long trap = (breakpoint->previous_code & 0xFFFFFFFFFFFFFF00) | 0xCC;
+    if (ptrace(PTRACE_POKEDATA, pid, (void *)breakpoint->address, (void *)trap) == -1)
+        die("(pokedata) %s", strerror(errno));
+}
 int set_symbol_breakpoint(int pid, const char *symbol)
 {
     long addr = get_symbol_value(symbol);
@@ -235,20 +247,31 @@ int set_symbol_breakpoint(int pid, const char *symbol)
 
 void process_step(int pid)
 {
-
     if (ptrace(PTRACE_SINGLESTEP, pid, 0, 0) == -1)
         die("(singlestep) %s", strerror(errno));
 
     waitpid(pid, 0, 0);
+    struct user_regs_struct regs;
+    if (ptrace(PTRACE_GETREGS, pid, 0, &regs) == -1)
+    {
+        if (errno == ESRCH)
+        {
+            /* System call was exit; so we need to end.  */
+            fprintf(stderr, "\n");
+            return;
+        }
+        die("%s", strerror(errno));
+    }
+    unsigned char *buffer = NULL;
+    size_t bytes_read = get_instruction_buffer(&buffer, pid, regs.rip, 11);
+    disas(handle, (const unsigned char *)buffer, bytes_read, regs.rip);
 }
 
-void serve_breakpoint(int pid)
+breakpoint_t *serve_breakpoint(pid_t pid)
 {
     struct user_regs_struct regs;
     if (ptrace(PTRACE_GETREGS, pid, 0, &regs) == -1)
         die("(getregs) %s", strerror(errno));
-
-    fprintf(stderr, "Resuming.\n");
 
     breakpoint_t *breakpoint = get_breakpoint_by_address(breakpoints, regs.rip - 1);
     if (ptrace(PTRACE_POKEDATA, pid, (void *)breakpoint->address, (void *)breakpoint->previous_code) == -1)
@@ -257,6 +280,7 @@ void serve_breakpoint(int pid)
     if (ptrace(PTRACE_SETREGS, pid, 0, &regs) == -1)
         die("(setregs) %s", strerror(errno));
     process_inspect(pid, &regs, breakpoint);
+    return breakpoint;
 }
 
 void delete_breakpoint(pid_t pid, int index)
@@ -284,7 +308,7 @@ int check_if_breakpoint(pid_t pid, struct user_regs_struct *regs)
     return current_ins == 0xcc;
 }
 
-int execute(pid_t pid)
+int execute(pid_t pid, breakpoint_t **hit_breakpoint)
 {
     int status = 0;
     while (1)
@@ -309,7 +333,44 @@ int execute(pid_t pid)
         }
         if (check_if_breakpoint(pid, &regs))
         {
-            serve_breakpoint(pid);
+            *hit_breakpoint = serve_breakpoint(pid);
+            return CHILD_BREAKPOINT;
+        }
+    }
+}
+int continue_execution(pid_t pid, breakpoint_t **last_hit_breakpoint)
+{
+    // Execute instruction execution paused on
+    if (ptrace(PTRACE_SINGLESTEP, pid, 0, 0) == -1)
+        die("(singlestep) %s", strerror(errno));
+    waitpid(pid, 0, 0);
+
+    // Reset breakpoint at that address
+    reset_breakpoint(pid, *last_hit_breakpoint);
+    int status = 0;
+    while (1)
+    {
+        if (ptrace(PTRACE_CONT, pid, 0, 0) == -1)
+            die("%s", strerror(errno));
+        /* Block until process state change (i.e., next event). */
+        if (waitpid(pid, &status, 0) == -1)
+            die("%s", strerror(errno));
+
+        /* Collect information about the system call.  */
+        struct user_regs_struct regs;
+        if (ptrace(PTRACE_GETREGS, pid, 0, &regs) == -1)
+        {
+            if (errno == ESRCH)
+            {
+                /* System call was exit; so we need to end.  */
+                fprintf(stderr, "\n");
+                return CHILD_EXIT;
+            }
+            die("%s", strerror(errno));
+        }
+        if (check_if_breakpoint(pid, &regs))
+        {
+            *last_hit_breakpoint = serve_breakpoint(pid);
             return CHILD_BREAKPOINT;
         }
     }
@@ -368,6 +429,7 @@ int main(int argc, char **argv)
 
     breakpoints = list_init();
     char *command = NULL;
+    breakpoint_t *last_hit_breakpoint = NULL;
     while (1)
     {
         printf("(paphitisdb) ");
@@ -377,9 +439,9 @@ int main(int argc, char **argv)
         {
             if (child_state == LOADED)
             {
-                if (execute(pid) == CHILD_EXIT)
-                    child_state = EXITED;
                 child_state = EXECUTING;
+                if (execute(pid, &last_hit_breakpoint) == CHILD_EXIT)
+                    child_state = EXITED;
             }
             else
                 printf("Program is executing or has finished\n");
@@ -390,8 +452,17 @@ int main(int argc, char **argv)
                 printf("Program has not started or has finished\n");
             else
             {
-                if (execute(pid) == CHILD_EXIT)
+                if (continue_execution(pid, &last_hit_breakpoint) == CHILD_EXIT)
                     child_state = EXITED;
+            }
+        }
+        else if (!strcmp(token, "si"))
+        {
+            if (child_state != EXECUTING)
+                printf("Program has not started or has finished\n");
+            else
+            {
+                process_step(pid);
             }
         }
         else if (!strcmp(token, "b"))
@@ -423,6 +494,8 @@ int main(int argc, char **argv)
                 delete_breakpoint(pid, index);
             }
         }
+        else if (!strcmp(token, "quit"))
+            break;
         else
         {
             printf(
