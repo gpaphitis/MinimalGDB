@@ -310,12 +310,37 @@ int check_if_breakpoint(pid_t pid, struct user_regs_struct *regs)
 int process_step(int pid, int steps)
 {
     struct user_regs_struct regs;
+    if (ptrace(PTRACE_GETREGS, pid, 0, &regs) == -1)
+    {
+        if (errno == ESRCH)
+        {
+            /* System call was exit; so we need to end.  */
+            fprintf(stderr, "\n");
+            return CHILD_EXIT;
+        }
+        die("%s", strerror(errno));
+    }
     for (int i = 0; i < steps; i++)
     {
-        if (ptrace(PTRACE_SINGLESTEP, pid, 0, 0) == -1)
-            die("(singlestep) %s", strerror(errno));
+        breakpoint_t *reached_breakpoint = get_breakpoint_by_address(breakpoints, regs.rip);
+        // About to execute a breakpoint
+        if (reached_breakpoint != NULL)
+        {
+            // Replace breakpoint with actual code, execute it and reset the breakpoint
+            if (ptrace(PTRACE_POKEDATA, pid, (void *)reached_breakpoint->address, (void *)reached_breakpoint->previous_code) == -1)
+                die("(pokedata) %s", strerror(errno));
+            if (ptrace(PTRACE_SINGLESTEP, pid, 0, 0) == -1)
+                die("(singlestep) %s", strerror(errno));
+            waitpid(pid, 0, 0);
+            reset_breakpoint(pid, reached_breakpoint);
+        }
+        else
+        {
+            if (ptrace(PTRACE_SINGLESTEP, pid, 0, 0) == -1)
+                die("(singlestep) %s", strerror(errno));
+            waitpid(pid, 0, 0);
+        }
 
-        waitpid(pid, 0, 0);
         if (ptrace(PTRACE_GETREGS, pid, 0, &regs) == -1)
         {
             if (errno == ESRCH)
@@ -365,10 +390,24 @@ int execute(pid_t pid)
 }
 int continue_execution(pid_t pid)
 {
+    struct user_regs_struct regs;
+    if (ptrace(PTRACE_GETREGS, pid, 0, &regs) == -1)
+    {
+        if (errno == ESRCH)
+        {
+            /* System call was exit; so we need to end.  */
+            fprintf(stderr, "\n");
+            return CHILD_EXIT;
+        }
+        die("%s", strerror(errno));
+    }
     // Execute instruction execution paused on
-    if (ptrace(PTRACE_SINGLESTEP, pid, 0, 0) == -1)
-        die("(singlestep) %s", strerror(errno));
-    waitpid(pid, 0, 0);
+    if (regs.rip == last_hit_breakpoint->address)
+    {
+        if (ptrace(PTRACE_SINGLESTEP, pid, 0, 0) == -1)
+            die("(singlestep) %s", strerror(errno));
+        waitpid(pid, 0, 0);
+    }
 
     // Reset breakpoint at that address
     reset_breakpoint(pid, last_hit_breakpoint);
@@ -382,7 +421,6 @@ int continue_execution(pid_t pid)
             die("%s", strerror(errno));
 
         /* Collect information about the system call.  */
-        struct user_regs_struct regs;
         if (ptrace(PTRACE_GETREGS, pid, 0, &regs) == -1)
         {
             if (errno == ESRCH)
