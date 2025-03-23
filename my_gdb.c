@@ -32,11 +32,12 @@
         exit(EXIT_FAILURE);                     \
     } while (0)
 
-#define CHILD_BREAKPOINT 0
-#define CHILD_EXIT 1
+#define CHILD_BREAKPOINT 1
+#define CHILD_EXIT 2
 #define MAX_INSN_SIZE 15
 
 list_t *breakpoints;
+breakpoint_t *last_hit_breakpoint;
 csh handle;
 Elf *elf;
 
@@ -170,29 +171,46 @@ size_t get_instruction_buffer(unsigned char **buffer, pid_t pid, long address, s
     return bytes_read;
 }
 
-void disas(csh handle, const unsigned char *buffer, unsigned int size, long address)
+void disas(csh handle, unsigned char *buffer, unsigned int size, long address, long offset, int count)
 {
     cs_insn *insn;
-    size_t count;
+    size_t disassembled_count;
 
-    count = cs_disasm(handle, buffer, size, 0x0, 11, &insn);
+    disassembled_count = cs_disasm(handle, buffer, size, address + offset, count, &insn);
+    int bytes_disassembled = 0;
+    int breakpoint_found = 0;
 
-    if (count > 0)
+    if (disassembled_count > 0)
     {
         size_t j;
-        for (j = 0; j < count; j++)
+        for (j = 0; j < disassembled_count; j++)
         {
-            if (j == 0)
+            if (!strcmp(insn[j].mnemonic, "int3"))
+            {
+                breakpoint_found = 1;
+                break;
+            }
+            if (j == 0 && offset == 0)
                 fprintf(stderr, "=> ");
-            char *symbol = get_symbol(address + insn[j].address);
+            char *symbol = get_symbol(insn[j].address);
             if (symbol == NULL)
-                fprintf(stderr, "\x1b[34m0x%" PRIx64 "\x1b[0m:\t", address + insn[j].address);
+                fprintf(stderr, "\x1b[34m0x%" PRIx64 "\x1b[0m:\t", insn[j].address);
             else
                 fprintf(stderr, "\x1b[33m%s\x1b[0m :\t", symbol);
             fprintf(stderr, "%s\t\t%s\n", insn[j].mnemonic,
                     insn[j].op_str);
+            bytes_disassembled += insn[j].size;
+            if (insn[j].id == X86_INS_RET)
+                break;
         }
-        cs_free(insn, count);
+        cs_free(insn, disassembled_count);
+        if (breakpoint_found)
+        {
+            breakpoint_t *disassembled_breakpoint = get_breakpoint_by_address(breakpoints, address + bytes_disassembled);
+            buffer[bytes_disassembled] &= 0x00;
+            buffer[bytes_disassembled] |= (disassembled_breakpoint->previous_code & 0xFF);
+            disas(handle, &buffer[bytes_disassembled], size, address, bytes_disassembled, count - disassembled_count);
+        }
     }
     else
         fprintf(stderr, "ERROR: Failed to disassemble given code!\n");
@@ -205,7 +223,7 @@ void process_inspect(int pid, struct user_regs_struct *regs, breakpoint_t *break
         die("(peekdata) %s", strerror(errno));
     unsigned char *buffer = NULL;
     size_t bytes_read = get_instruction_buffer(&buffer, pid, breakpoint->address, 11);
-    disas(handle, (const unsigned char *)buffer, bytes_read, breakpoint->address);
+    disas(handle, (unsigned char *)buffer, bytes_read, breakpoint->address, 0, 11);
 }
 
 void set_breakpoint(int pid, long addr, const char *symbol)
@@ -243,28 +261,6 @@ int set_symbol_breakpoint(int pid, const char *symbol)
         return -1;
     set_breakpoint(pid, addr, symbol);
     return 0;
-}
-
-void process_step(int pid)
-{
-    if (ptrace(PTRACE_SINGLESTEP, pid, 0, 0) == -1)
-        die("(singlestep) %s", strerror(errno));
-
-    waitpid(pid, 0, 0);
-    struct user_regs_struct regs;
-    if (ptrace(PTRACE_GETREGS, pid, 0, &regs) == -1)
-    {
-        if (errno == ESRCH)
-        {
-            /* System call was exit; so we need to end.  */
-            fprintf(stderr, "\n");
-            return;
-        }
-        die("%s", strerror(errno));
-    }
-    unsigned char *buffer = NULL;
-    size_t bytes_read = get_instruction_buffer(&buffer, pid, regs.rip, 11);
-    disas(handle, (const unsigned char *)buffer, bytes_read, regs.rip);
 }
 
 breakpoint_t *serve_breakpoint(pid_t pid)
@@ -307,8 +303,33 @@ int check_if_breakpoint(pid_t pid, struct user_regs_struct *regs)
 
     return current_ins == 0xcc;
 }
+int process_step(int pid, int steps)
+{
+    struct user_regs_struct regs;
+    for (int i = 0; i < steps; i++)
+    {
+        if (ptrace(PTRACE_SINGLESTEP, pid, 0, 0) == -1)
+            die("(singlestep) %s", strerror(errno));
 
-int execute(pid_t pid, breakpoint_t **hit_breakpoint)
+        waitpid(pid, 0, 0);
+        if (ptrace(PTRACE_GETREGS, pid, 0, &regs) == -1)
+        {
+            if (errno == ESRCH)
+            {
+                /* System call was exit; so we need to end.  */
+                fprintf(stderr, "\n");
+                return CHILD_EXIT;
+            }
+            die("%s", strerror(errno));
+        }
+    }
+    unsigned char *buffer = NULL;
+    size_t bytes_read = get_instruction_buffer(&buffer, pid, regs.rip, 11);
+    disas(handle, (unsigned char *)buffer, bytes_read, regs.rip, 0, 11);
+    return 0;
+}
+
+int execute(pid_t pid)
 {
     int status = 0;
     while (1)
@@ -333,12 +354,12 @@ int execute(pid_t pid, breakpoint_t **hit_breakpoint)
         }
         if (check_if_breakpoint(pid, &regs))
         {
-            *hit_breakpoint = serve_breakpoint(pid);
+            last_hit_breakpoint = serve_breakpoint(pid);
             return CHILD_BREAKPOINT;
         }
     }
 }
-int continue_execution(pid_t pid, breakpoint_t **last_hit_breakpoint)
+int continue_execution(pid_t pid)
 {
     // Execute instruction execution paused on
     if (ptrace(PTRACE_SINGLESTEP, pid, 0, 0) == -1)
@@ -346,7 +367,7 @@ int continue_execution(pid_t pid, breakpoint_t **last_hit_breakpoint)
     waitpid(pid, 0, 0);
 
     // Reset breakpoint at that address
-    reset_breakpoint(pid, *last_hit_breakpoint);
+    reset_breakpoint(pid, last_hit_breakpoint);
     int status = 0;
     while (1)
     {
@@ -370,7 +391,7 @@ int continue_execution(pid_t pid, breakpoint_t **last_hit_breakpoint)
         }
         if (check_if_breakpoint(pid, &regs))
         {
-            *last_hit_breakpoint = serve_breakpoint(pid);
+            last_hit_breakpoint = serve_breakpoint(pid);
             return CHILD_BREAKPOINT;
         }
     }
@@ -429,7 +450,6 @@ int main(int argc, char **argv)
 
     breakpoints = list_init();
     char *command = NULL;
-    breakpoint_t *last_hit_breakpoint = NULL;
     while (1)
     {
         printf("(paphitisdb) ");
@@ -440,7 +460,7 @@ int main(int argc, char **argv)
             if (child_state == LOADED)
             {
                 child_state = EXECUTING;
-                if (execute(pid, &last_hit_breakpoint) == CHILD_EXIT)
+                if (execute(pid) == CHILD_EXIT)
                     child_state = EXITED;
             }
             else
@@ -452,7 +472,7 @@ int main(int argc, char **argv)
                 printf("Program has not started or has finished\n");
             else
             {
-                if (continue_execution(pid, &last_hit_breakpoint) == CHILD_EXIT)
+                if (continue_execution(pid) == CHILD_EXIT)
                     child_state = EXITED;
             }
         }
@@ -462,7 +482,13 @@ int main(int argc, char **argv)
                 printf("Program has not started or has finished\n");
             else
             {
-                process_step(pid);
+                token = strtok(NULL, " ");
+                int steps = token == NULL ? 1 : atoi(token);
+                if (process_step(pid, steps) == CHILD_EXIT)
+                {
+                    child_state = EXITED;
+                    break;
+                }
             }
         }
         else if (!strcmp(token, "b"))
