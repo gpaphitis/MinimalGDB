@@ -253,7 +253,7 @@ void disas(csh handle, unsigned char *buffer, unsigned int size, long address, l
             breakpoint_t *disassembled_breakpoint = get_breakpoint_by_address(breakpoints, address + bytes_disassembled);
             buffer[bytes_disassembled] &= 0x00;
             buffer[bytes_disassembled] |= (disassembled_breakpoint->previous_code & 0xFF);
-            disas(handle, &buffer[bytes_disassembled], size, address, bytes_disassembled, count - disassembled_count);
+            disas(handle, &buffer[bytes_disassembled], size, address, bytes_disassembled, count - j);
         }
     }
     else
