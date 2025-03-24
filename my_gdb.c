@@ -13,6 +13,7 @@
 /* Linux */
 #include <syscall.h>
 #include <sys/ptrace.h>
+#include <signal.h>
 
 #include <fcntl.h>
 #include <libelf.h>
@@ -483,6 +484,34 @@ int continue_execution(pid_t pid)
     }
 }
 
+pid_t load_child(char **argv)
+{
+    pid_t pid = fork();
+    switch (pid)
+    {
+    case -1:
+        die("%s", strerror(errno));
+    case 0:
+        ptrace(PTRACE_TRACEME, 0, 0, 0);
+        execvp(argv[1], argv + 1);
+        die("%s", strerror(errno));
+    }
+    waitpid(pid, 0, 0);
+    ptrace(PTRACE_SETOPTIONS, pid, 0, PTRACE_O_EXITKILL);
+    child_state = LOADED;
+    return pid;
+}
+
+pid_t reload_child(pid_t child_pid, char **argv)
+{
+    kill(child_pid, SIGKILL);
+    waitpid(child_pid, NULL, 0);
+    pid_t pid = load_child(argv);
+    for (int i = 0; i < breakpoints->size; i++)
+        reset_breakpoint(pid, get_breakpoint(breakpoints, i));
+    return pid;
+}
+
 char *get_command()
 {
     char *input = malloc(60 * sizeof(char));
@@ -492,11 +521,12 @@ char *get_command()
         return NULL;
     }
     size_t len = strlen(input);
-    if (len > 0 && input[len - 1] == '\n')
+    if (len > 1 && input[len - 1] == '\n')
     {
         input[len - 1] = '\0';
+        return input;
     }
-    return input;
+    return NULL;
 }
 
 int main(int argc, char **argv)
@@ -519,21 +549,7 @@ int main(int argc, char **argv)
     cs_option(handle, CS_OPT_SYNTAX, CS_OPT_SYNTAX_ATT);
     cs_option(handle, CS_OPT_DETAIL, CS_OPT_ON);
 
-    pid_t pid = fork();
-    switch (pid)
-    {
-    case -1:
-        die("%s", strerror(errno));
-    case 0:
-        ptrace(PTRACE_TRACEME, 0, 0, 0);
-        execvp(argv[1], argv + 1);
-        die("%s", strerror(errno));
-    }
-    child_state = LOADED;
-
-    // Wait for execvp()
-    waitpid(pid, 0, 0);
-    ptrace(PTRACE_SETOPTIONS, pid, 0, PTRACE_O_EXITKILL);
+    pid_t pid = load_child(argv);
 
     breakpoints = list_init();
     char *command = NULL;
@@ -541,17 +557,19 @@ int main(int argc, char **argv)
     {
         printf("(paphitisdb) ");
         command = get_command(command);
+        if (command == NULL)
+        {
+            fprintf(stderr, "Enter command\n");
+            continue;
+        }
         char *token = strtok(command, " ");
         if (!strcmp(token, "r"))
         {
-            if (child_state == LOADED)
-            {
-                child_state = EXECUTING;
-                if (execute(pid) == CHILD_EXIT)
-                    child_state = EXITED;
-            }
-            else
-                printf("Program is executing or has finished\n");
+            if (child_state == EXECUTING)
+                pid = reload_child(pid, argv);
+            child_state = EXECUTING;
+            if (execute(pid) == CHILD_EXIT)
+                child_state = EXITED;
         }
         else if (!strcmp(token, "c"))
         {
@@ -609,6 +627,11 @@ int main(int argc, char **argv)
         }
         else if (!strcmp(token, "quit"))
             break;
+        else if (!strcmp(token, "clear"))
+        {
+            fprintf(stderr, "\033[H\033[J");
+            fflush(stderr);
+        }
         else
         {
             printf(
@@ -617,7 +640,10 @@ int main(int argc, char **argv)
                 "l\t\t\tPrints list of set breakpoints\n"
                 "r\t\t\tChild (re)starts execution\n"
                 "c\t\t\tChild continues execution\n"
-                "d [index]\tDelete breakpoint at index, if not defined deletes all\n");
+                "si <steps>\t\tSingle steps <steps> instruction, 1 if omitted\n"
+                "d [index]\t\tDelete breakpoint at index, if not defined deletes all\n"
+                "quit\t\t\tExits\n"
+                "clear\t\t\tClears screen\n");
         }
         free(command);
     }
