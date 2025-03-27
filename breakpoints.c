@@ -88,6 +88,8 @@ void clear_breakpoint(node_t *current)
 {
    if (current->next != NULL)
       clear_breakpoint(current->next);
+   if (current->breakpoint->symbol != NULL)
+      free(current->breakpoint->symbol);
    free(current->breakpoint);
    free(current);
 }

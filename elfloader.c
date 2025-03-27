@@ -78,5 +78,5 @@ long get_symbol_value(const char *symbol)
          }
       }
    }
-   return 0;
+   return -1;
 }
