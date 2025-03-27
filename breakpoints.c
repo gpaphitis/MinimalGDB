@@ -60,6 +60,8 @@ void remove_breakpoint(list_t *list, int index)
    else
       list->head = target->next;
    list->size--;
+   if (target->breakpoint->symbol != NULL)
+      free(target->breakpoint->symbol);
    free(target->breakpoint);
    free(target);
 }

@@ -41,7 +41,6 @@
 
 list_t *breakpoints;
 breakpoint_t *last_hit_breakpoint;
-// csh handle;
 
 enum child_state_t
 {
@@ -49,6 +48,21 @@ enum child_state_t
     EXECUTING,
     EXITED
 } child_state;
+size_t get_instruction_buffer(unsigned char **buffer, pid_t pid, long address, size_t count);
+int process_step(int pid, int steps);
+void process_inspect(int pid, struct user_regs_struct *regs, breakpoint_t *breakpoint);
+int check_if_breakpoint(pid_t pid, struct user_regs_struct *regs);
+void clear_breakpoints(pid_t pid);
+void delete_breakpoint(pid_t pid, int index);
+breakpoint_t *serve_breakpoint(pid_t pid);
+void reset_breakpoint(int pid, breakpoint_t *breakpoint);
+void set_breakpoint(int pid, long addr, const char *symbol);
+int set_symbol_breakpoint(int pid, const char *symbol);
+int continue_execution(pid_t pid);
+int execute(pid_t pid);
+pid_t reload_child(pid_t child_pid, char **argv);
+pid_t load_child(char **argv);
+char *get_command();
 
 size_t get_instruction_buffer(unsigned char **buffer, pid_t pid, long address, size_t count)
 {
@@ -73,99 +87,6 @@ size_t get_instruction_buffer(unsigned char **buffer, pid_t pid, long address, s
         bytes_read += sizeof(word);
     }
     return bytes_read;
-}
-
-void process_inspect(int pid, struct user_regs_struct *regs, breakpoint_t *breakpoint)
-{
-    long current_ins = ptrace(PTRACE_PEEKDATA, pid, regs->rip, 0);
-    if (current_ins == -1)
-        die("(peekdata) %s", strerror(errno));
-    fprintf(stderr, "Breakpoint \x1b[34m0x%lx\x1b[0m", breakpoint->address);
-    if (breakpoint->symbol != NULL)
-        fprintf(stderr, " in \x1b[33m%s\x1b[0m", breakpoint->symbol);
-    fprintf(stderr, "\n");
-    unsigned char *buffer = NULL;
-    size_t bytes_read = get_instruction_buffer(&buffer, pid, breakpoint->address, 11);
-    disas(breakpoints, (unsigned char *)buffer, bytes_read, breakpoint->address, 0, 11);
-    free(buffer);
-}
-
-void set_breakpoint(int pid, long addr, const char *symbol)
-{
-    /* Backup current code.  */
-    long previous_code = 0;
-    previous_code = ptrace(PTRACE_PEEKDATA, pid, (void *)addr, 0);
-    if (previous_code == -1)
-        die("(peekdata) %s", strerror(errno));
-    // If symbol not given, try and find it
-    symbol = (symbol != NULL) ? symbol : get_symbol(addr);
-    int index = add_breakpoint(breakpoints, addr, previous_code, symbol);
-    if (index >= 0)
-    {
-        fprintf(stderr, "Breakpoint %d at \x1b[34m0x%lx\x1b[0m", index, addr);
-        if (symbol != NULL)
-            fprintf(stderr, " \x1b[33m<%s>\x1b[0m", symbol);
-        fprintf(stderr, "\n");
-        /* Insert the breakpoint. */
-        long trap = (previous_code & 0xFFFFFFFFFFFFFF00) | 0xCC;
-        if (ptrace(PTRACE_POKEDATA, pid, (void *)addr, (void *)trap) == -1)
-            die("(pokedata) %s", strerror(errno));
-    }
-}
-void reset_breakpoint(int pid, breakpoint_t *breakpoint)
-{
-    long trap = (breakpoint->previous_code & 0xFFFFFFFFFFFFFF00) | 0xCC;
-    if (ptrace(PTRACE_POKEDATA, pid, (void *)breakpoint->address, (void *)trap) == -1)
-        die("(pokedata) %s", strerror(errno));
-}
-int set_symbol_breakpoint(int pid, const char *symbol)
-{
-    long addr = get_symbol_value(symbol);
-    if (addr == -1)
-        return -1;
-    set_breakpoint(pid, addr, symbol);
-    return 0;
-}
-
-breakpoint_t *serve_breakpoint(pid_t pid)
-{
-    struct user_regs_struct regs;
-    if (ptrace(PTRACE_GETREGS, pid, 0, &regs) == -1)
-        die("(getregs) %s", strerror(errno));
-
-    breakpoint_t *breakpoint = get_breakpoint_by_address(breakpoints, regs.rip - 1);
-    if (ptrace(PTRACE_POKEDATA, pid, (void *)breakpoint->address, (void *)breakpoint->previous_code) == -1)
-        die("(pokedata) %s", strerror(errno));
-    regs.rip = breakpoint->address;
-    if (ptrace(PTRACE_SETREGS, pid, 0, &regs) == -1)
-        die("(setregs) %s", strerror(errno));
-    process_inspect(pid, &regs, breakpoint);
-    return breakpoint;
-}
-
-void delete_breakpoint(pid_t pid, int index)
-{
-    breakpoint_t *breakpoint = get_breakpoint(breakpoints, index);
-    if (ptrace(PTRACE_POKEDATA, pid, (void *)breakpoint->address, (void *)breakpoint->previous_code) == -1)
-        die("(pokedata) %s", strerror(errno));
-    remove_breakpoint(breakpoints, index);
-}
-void clear_breakpopints(pid_t pid)
-{
-    int total = get_num_breakpoints(breakpoints);
-    for (int i = 0; i < total; i++)
-        delete_breakpoint(pid, i);
-}
-
-int check_if_breakpoint(pid_t pid, struct user_regs_struct *regs)
-{
-    // Get opcode of previous instruction(the one that caused pause)
-    long current_ins = ptrace(PTRACE_PEEKDATA, pid, regs->rip - 1, 0);
-    if (current_ins == -1)
-        die("(peekdata) %s", strerror(errno));
-    current_ins &= 0x00000000000000FF;
-
-    return current_ins == 0xcc;
 }
 int process_step(int pid, int steps)
 {
@@ -219,36 +140,106 @@ int process_step(int pid, int steps)
     return 0;
 }
 
-int execute(pid_t pid)
+void process_inspect(int pid, struct user_regs_struct *regs, breakpoint_t *breakpoint)
 {
-    int status = 0;
-    while (1)
-    {
-        if (ptrace(PTRACE_CONT, pid, 0, 0) == -1)
-            die("%s", strerror(errno));
-        /* Block until process state change (i.e., next event). */
-        if (waitpid(pid, &status, 0) == -1)
-            die("%s", strerror(errno));
+    long current_ins = ptrace(PTRACE_PEEKDATA, pid, regs->rip, 0);
+    if (current_ins == -1)
+        die("(peekdata) %s", strerror(errno));
+    fprintf(stderr, "Breakpoint \x1b[34m0x%lx\x1b[0m", breakpoint->address);
+    if (breakpoint->symbol != NULL)
+        fprintf(stderr, " in \x1b[33m%s\x1b[0m", breakpoint->symbol);
+    fprintf(stderr, "\n");
+    unsigned char *buffer = NULL;
+    size_t bytes_read = get_instruction_buffer(&buffer, pid, breakpoint->address, 11);
+    disas(breakpoints, (unsigned char *)buffer, bytes_read, breakpoint->address, 0, 11);
+    free(buffer);
+}
 
-        /* Collect information about the system call.  */
-        struct user_regs_struct regs;
-        if (ptrace(PTRACE_GETREGS, pid, 0, &regs) == -1)
-        {
-            if (errno == ESRCH)
-            {
-                /* System call was exit; so we need to end.  */
-                fprintf(stderr, "\n");
-                return CHILD_EXIT;
-            }
-            die("%s", strerror(errno));
-        }
-        if (check_if_breakpoint(pid, &regs))
-        {
-            last_hit_breakpoint = serve_breakpoint(pid);
-            return CHILD_BREAKPOINT;
-        }
+int check_if_breakpoint(pid_t pid, struct user_regs_struct *regs)
+{
+    // Get opcode of previous instruction(the one that caused pause)
+    long current_ins = ptrace(PTRACE_PEEKDATA, pid, regs->rip - 1, 0);
+    if (current_ins == -1)
+        die("(peekdata) %s", strerror(errno));
+    current_ins &= 0x00000000000000FF;
+
+    return current_ins == 0xcc;
+}
+
+void clear_breakpoints(pid_t pid)
+{
+    int total = get_num_breakpoints(breakpoints);
+    for (int i = 0; i < total; i++)
+    {
+        delete_breakpoint(pid, i);
+    }
+    remove_all(breakpoints);
+}
+
+void delete_breakpoint(pid_t pid, int index)
+{
+    breakpoint_t *breakpoint = get_breakpoint(breakpoints, index);
+    if (breakpoint == NULL)
+        return;
+    if (ptrace(PTRACE_POKEDATA, pid, (void *)breakpoint->address, (void *)breakpoint->previous_code) == -1)
+        die("(pokedata) %s", strerror(errno));
+}
+
+breakpoint_t *serve_breakpoint(pid_t pid)
+{
+    struct user_regs_struct regs;
+    if (ptrace(PTRACE_GETREGS, pid, 0, &regs) == -1)
+        die("(getregs) %s", strerror(errno));
+
+    breakpoint_t *breakpoint = get_breakpoint_by_address(breakpoints, regs.rip - 1);
+    if (ptrace(PTRACE_POKEDATA, pid, (void *)breakpoint->address, (void *)breakpoint->previous_code) == -1)
+        die("(pokedata) %s", strerror(errno));
+    regs.rip = breakpoint->address;
+    if (ptrace(PTRACE_SETREGS, pid, 0, &regs) == -1)
+        die("(setregs) %s", strerror(errno));
+    process_inspect(pid, &regs, breakpoint);
+    return breakpoint;
+}
+
+void reset_breakpoint(int pid, breakpoint_t *breakpoint)
+{
+    long trap = (breakpoint->previous_code & 0xFFFFFFFFFFFFFF00) | 0xCC;
+    if (ptrace(PTRACE_POKEDATA, pid, (void *)breakpoint->address, (void *)trap) == -1)
+        die("(pokedata) %s", strerror(errno));
+}
+
+void set_breakpoint(int pid, long addr, const char *symbol)
+{
+    /* Backup current code.  */
+    long previous_code = 0;
+    previous_code = ptrace(PTRACE_PEEKDATA, pid, (void *)addr, 0);
+    if (previous_code == -1)
+        die("(peekdata) %s", strerror(errno));
+    // If symbol not given, try and find it
+    symbol = (symbol != NULL) ? symbol : get_symbol(addr);
+    int index = add_breakpoint(breakpoints, addr, previous_code, symbol);
+    if (index >= 0)
+    {
+        fprintf(stderr, "Breakpoint %d at \x1b[34m0x%lx\x1b[0m", index, addr);
+        if (symbol != NULL)
+            fprintf(stderr, " \x1b[33m<%s>\x1b[0m", symbol);
+        fprintf(stderr, "\n");
+        /* Insert the breakpoint. */
+        long trap = (previous_code & 0xFFFFFFFFFFFFFF00) | 0xCC;
+        if (ptrace(PTRACE_POKEDATA, pid, (void *)addr, (void *)trap) == -1)
+            die("(pokedata) %s", strerror(errno));
     }
 }
+
+int set_symbol_breakpoint(int pid, const char *symbol)
+{
+    long addr = get_symbol_value(symbol);
+    if (addr == -1)
+        return -1;
+    set_breakpoint(pid, addr, symbol);
+    return 0;
+}
+
 int continue_execution(pid_t pid)
 {
     struct user_regs_struct regs;
@@ -300,6 +291,47 @@ int continue_execution(pid_t pid)
     }
 }
 
+int execute(pid_t pid)
+{
+    int status = 0;
+    while (1)
+    {
+        if (ptrace(PTRACE_CONT, pid, 0, 0) == -1)
+            die("%s", strerror(errno));
+        /* Block until process state change (i.e., next event). */
+        if (waitpid(pid, &status, 0) == -1)
+            die("%s", strerror(errno));
+
+        /* Collect information about the system call.  */
+        struct user_regs_struct regs;
+        if (ptrace(PTRACE_GETREGS, pid, 0, &regs) == -1)
+        {
+            if (errno == ESRCH)
+            {
+                /* System call was exit; so we need to end.  */
+                fprintf(stderr, "\n");
+                return CHILD_EXIT;
+            }
+            die("%s", strerror(errno));
+        }
+        if (check_if_breakpoint(pid, &regs))
+        {
+            last_hit_breakpoint = serve_breakpoint(pid);
+            return CHILD_BREAKPOINT;
+        }
+    }
+}
+
+pid_t reload_child(pid_t child_pid, char **argv)
+{
+    kill(child_pid, SIGKILL);
+    waitpid(child_pid, NULL, 0);
+    pid_t pid = load_child(argv);
+    for (int i = 0; i < breakpoints->size; i++)
+        reset_breakpoint(pid, get_breakpoint(breakpoints, i));
+    return pid;
+}
+
 pid_t load_child(char **argv)
 {
     pid_t pid = fork();
@@ -315,16 +347,6 @@ pid_t load_child(char **argv)
     waitpid(pid, 0, 0);
     ptrace(PTRACE_SETOPTIONS, pid, 0, PTRACE_O_EXITKILL);
     child_state = LOADED;
-    return pid;
-}
-
-pid_t reload_child(pid_t child_pid, char **argv)
-{
-    kill(child_pid, SIGKILL);
-    waitpid(child_pid, NULL, 0);
-    pid_t pid = load_child(argv);
-    for (int i = 0; i < breakpoints->size; i++)
-        reset_breakpoint(pid, get_breakpoint(breakpoints, i));
     return pid;
 }
 
@@ -424,7 +446,7 @@ int main(int argc, char **argv)
         {
             token = strtok(NULL, " "); // Get the next token
             if (token == NULL)
-                clear_breakpopints(pid);
+                clear_breakpoints(pid);
             else
             {
                 int index = (int)strtol(token, NULL, 10);
