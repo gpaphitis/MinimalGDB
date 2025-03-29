@@ -38,6 +38,7 @@
 #define CHILD_BREAKPOINT 1
 #define CHILD_EXIT 2
 #define MAX_INSN_SIZE 15
+#define MAX_DISAS_INSN_COUNT 11
 
 list_t *breakpoints;
 breakpoint_t *last_hit_breakpoint;
@@ -48,6 +49,7 @@ enum child_state_t
     EXECUTING,
     EXITED
 } child_state;
+
 size_t get_instruction_buffer(unsigned char **buffer, pid_t pid, long address, size_t count);
 int process_step(int pid, int steps);
 void process_inspect(int pid, struct user_regs_struct *regs, breakpoint_t *breakpoint);
@@ -63,6 +65,8 @@ int execute(pid_t pid);
 pid_t reload_child(pid_t child_pid, char **argv);
 pid_t load_child(char **argv);
 char *get_command();
+void clear_input_buffer();
+int confirm_choice(char *dialog);
 
 size_t get_instruction_buffer(unsigned char **buffer, pid_t pid, long address, size_t count)
 {
@@ -79,7 +83,7 @@ size_t get_instruction_buffer(unsigned char **buffer, pid_t pid, long address, s
         }
 
         // Copy the word to the buffer byte-by-byte
-        for (size_t i = 0; i < sizeof(word) && bytes_read + i < MAX_INSN_SIZE * 11; i++)
+        for (size_t i = 0; i < sizeof(word) && bytes_read + i < MAX_INSN_SIZE * MAX_DISAS_INSN_COUNT; i++)
         {
             (*buffer)[bytes_read + i] = (word >> (i * 8)) & 0xFF;
         }
@@ -134,8 +138,8 @@ int process_step(int pid, int steps)
         }
     }
     unsigned char *buffer = NULL;
-    size_t bytes_read = get_instruction_buffer(&buffer, pid, regs.rip, 11);
-    disas(breakpoints, (unsigned char *)buffer, bytes_read, regs.rip, 0, 11);
+    size_t bytes_read = get_instruction_buffer(&buffer, pid, regs.rip, MAX_DISAS_INSN_COUNT);
+    disas(breakpoints, (unsigned char *)buffer, bytes_read, regs.rip, 0, MAX_DISAS_INSN_COUNT);
     free(buffer);
     return 0;
 }
@@ -150,8 +154,8 @@ void process_inspect(int pid, struct user_regs_struct *regs, breakpoint_t *break
         fprintf(stderr, " in \x1b[33m%s\x1b[0m", breakpoint->symbol);
     fprintf(stderr, "\n");
     unsigned char *buffer = NULL;
-    size_t bytes_read = get_instruction_buffer(&buffer, pid, breakpoint->address, 11);
-    disas(breakpoints, (unsigned char *)buffer, bytes_read, breakpoint->address, 0, 11);
+    size_t bytes_read = get_instruction_buffer(&buffer, pid, breakpoint->address, MAX_DISAS_INSN_COUNT);
+    disas(breakpoints, (unsigned char *)buffer, bytes_read, breakpoint->address, 0, MAX_DISAS_INSN_COUNT);
     free(buffer);
 }
 
@@ -183,6 +187,9 @@ void delete_breakpoint(pid_t pid, int index)
         return;
     if (ptrace(PTRACE_POKEDATA, pid, (void *)breakpoint->address, (void *)breakpoint->previous_code) == -1)
         die("(pokedata) %s", strerror(errno));
+    if (breakpoint->address == last_hit_breakpoint->address)
+        last_hit_breakpoint = NULL;
+    remove_breakpoint(breakpoints, index);
 }
 
 breakpoint_t *serve_breakpoint(pid_t pid)
@@ -214,7 +221,11 @@ void set_breakpoint(int pid, long addr, const char *symbol)
     long previous_code = 0;
     previous_code = ptrace(PTRACE_PEEKDATA, pid, (void *)addr, 0);
     if (previous_code == -1)
-        die("(peekdata) %s", strerror(errno));
+    {
+        fprintf(stderr, "Cannot access memory at \x1b[34m0x%lx\x1b[0m\n", addr);
+        fprintf(stderr, "Cannot set breakpoint at \x1b[34m0x%lx\x1b[0m\n", addr);
+        return;
+    }
     // If symbol not given, try and find it
     symbol = (symbol != NULL) ? symbol : get_symbol(addr);
     int index = add_breakpoint(breakpoints, addr, previous_code, symbol);
@@ -227,7 +238,7 @@ void set_breakpoint(int pid, long addr, const char *symbol)
         /* Insert the breakpoint. */
         long trap = (previous_code & 0xFFFFFFFFFFFFFF00) | 0xCC;
         if (ptrace(PTRACE_POKEDATA, pid, (void *)addr, (void *)trap) == -1)
-            die("(pokedata) %s", strerror(errno));
+            die("set_breakpoint(pokedata) %s", strerror(errno));
     }
 }
 
@@ -253,16 +264,19 @@ int continue_execution(pid_t pid)
         }
         die("%s", strerror(errno));
     }
-    // Execute instruction execution paused on
-    if (regs.rip == last_hit_breakpoint->address)
+    if (last_hit_breakpoint != NULL)
     {
-        if (ptrace(PTRACE_SINGLESTEP, pid, 0, 0) == -1)
-            die("(singlestep) %s", strerror(errno));
-        waitpid(pid, 0, 0);
-    }
+        // Execute instruction execution paused on
+        if (regs.rip == last_hit_breakpoint->address)
+        {
+            if (ptrace(PTRACE_SINGLESTEP, pid, 0, 0) == -1)
+                die("(singlestep) %s", strerror(errno));
+            waitpid(pid, 0, 0);
+        }
 
-    // Reset breakpoint at that address
-    reset_breakpoint(pid, last_hit_breakpoint);
+        // Reset breakpoint at that address
+        reset_breakpoint(pid, last_hit_breakpoint);
+    }
     int status = 0;
     while (1)
     {
@@ -367,6 +381,39 @@ char *get_command()
     return NULL;
 }
 
+void clear_input_buffer()
+{
+    int c;
+    while ((c = getchar()) != '\n' && c != EOF)
+        ;
+}
+
+int confirm_choice(char *dialog)
+{
+    char input = '\0';
+    while (1)
+    {
+        fprintf(stderr, "%s", dialog);
+        fprintf(stderr, "(y or n) ");
+        if (scanf(" %c", &input) != 1)
+        {
+            clear_input_buffer();
+            continue;
+        }
+
+        if (input == 'y' || input == 'n')
+        {
+            clear_input_buffer();
+            break;
+        }
+
+        fprintf(stderr, "Please answer y or n.\n");
+        // Clear input buffer
+        clear_input_buffer();
+    }
+    return input == 'y' ? 1 : 0;
+}
+
 int main(int argc, char **argv)
 {
     if (argc <= 1)
@@ -397,6 +444,13 @@ int main(int argc, char **argv)
         if (!strcmp(token, "r"))
         {
             if (child_state == EXECUTING)
+            {
+                if (confirm_choice("The program being debugged has been started already.\nStart it from the beginning? "))
+                    pid = reload_child(pid, argv);
+                else
+                    continue;
+            }
+            else if (child_state == EXITED)
                 pid = reload_child(pid, argv);
             child_state = EXECUTING;
             if (execute(pid) == CHILD_EXIT)
@@ -418,14 +472,22 @@ int main(int argc, char **argv)
                 printf("Program has not started or has finished\n");
             else
             {
+                char *error = NULL;
                 token = strtok(NULL, " ");
-                int steps = token == NULL ? 1 : atoi(token);
+                int steps = strtol(token, &error, 10);
+                if (*error != '\0')
+                {
+                    fprintf(stderr, "Enter a valid number\n");
+                    continue;
+                }
                 if (process_step(pid, steps) == CHILD_EXIT)
                     child_state = EXITED;
             }
         }
         else if (!strcmp(token, "b"))
         {
+            if (child_state == EXITED)
+                pid = reload_child(pid, argv);
             token = strtok(NULL, " "); // Get the next token
             long address = 0;
             if (token[0] == '*')
@@ -437,7 +499,7 @@ int main(int argc, char **argv)
             else
             {
                 if (set_symbol_breakpoint(pid, token) == -1)
-                    printf("Symbol not found\n");
+                    printf("Function \"%s\" not defined.\n", token);
             }
         }
         else if (!strcmp(token, "l"))
@@ -449,14 +511,29 @@ int main(int argc, char **argv)
                 clear_breakpoints(pid);
             else
             {
-                int index = (int)strtol(token, NULL, 10);
+                char *error = NULL;
+                int index = (int)strtol(token, &error, 10);
+                if (*error != '\0')
+                {
+                    fprintf(stderr, "Enter a valid number\n");
+                    continue;
+                }
+                else if (index >= get_num_breakpoints(breakpoints))
+                {
+                    fprintf(stderr, "Index out of bounds\n");
+                    continue;
+                }
                 delete_breakpoint(pid, index);
             }
         }
         else if (!strcmp(token, "quit"))
         {
-            free(command);
+            char *dialog = malloc(100);
+            sprintf(dialog, "A debugging session is active.\n\n\tInferior 1 [process %d] will be killed.\n\nQuit anyway?", pid);
+            if (child_state == EXECUTING && confirm_choice(dialog))
+                free(dialog);
             break;
+            free(command);
         }
         else if (!strcmp(token, "clear"))
         {
