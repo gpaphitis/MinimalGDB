@@ -100,10 +100,10 @@ void disas(list_t *breakpoints, unsigned char *buffer, unsigned int size, long a
       cs_free(insn, disassembled_count);
       if (breakpoint_found)
       {
-         breakpoint_t *disassembled_breakpoint = get_breakpoint_by_address(breakpoints, address + bytes_disassembled);
+         breakpoint_t *disassembled_breakpoint = get_breakpoint_by_address(breakpoints, address + offset + bytes_disassembled);
          buffer[bytes_disassembled] &= 0x00;
          buffer[bytes_disassembled] |= (disassembled_breakpoint->previous_code & 0xFF);
-         disas(breakpoints, &buffer[bytes_disassembled], size, address, bytes_disassembled, count - j);
+         disas(breakpoints, &buffer[bytes_disassembled], size, address, bytes_disassembled + offset, count - j);
       }
    }
    else

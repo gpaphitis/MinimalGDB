@@ -10,5 +10,6 @@
 int initialize_elf_engine(char *filename);
 char *get_symbol(long address);
 long get_symbol_value(const char *symbol);
+void destroy_elf_loader();
 
 #endif

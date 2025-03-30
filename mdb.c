@@ -51,15 +51,16 @@ enum child_state_t
 } child_state;
 
 size_t get_instruction_buffer(unsigned char **buffer, pid_t pid, long address, size_t count);
-int process_step(int pid, int steps);
-void process_inspect(int pid, struct user_regs_struct *regs, breakpoint_t *breakpoint);
+int process_step(pid_t pid, int steps);
+void process_inspect(pid_t pid, struct user_regs_struct *regs, breakpoint_t *breakpoint);
 int check_if_breakpoint(pid_t pid, struct user_regs_struct *regs);
 void clear_breakpoints(pid_t pid);
 void delete_breakpoint(pid_t pid, int index);
 breakpoint_t *serve_breakpoint(pid_t pid);
-void reset_breakpoint(int pid, breakpoint_t *breakpoint);
-void set_breakpoint(int pid, long addr, const char *symbol);
-int set_symbol_breakpoint(int pid, const char *symbol);
+void reset_breakpoint(pid_t pid, breakpoint_t *breakpoint);
+void unset_breakpoint(pid_t pid, int index);
+void set_breakpoint(pid_t pid, long addr, const char *symbol);
+int set_symbol_breakpoint(pid_t pid, const char *symbol);
 int continue_execution(pid_t pid);
 int execute(pid_t pid);
 pid_t reload_child(pid_t child_pid, char **argv);
@@ -92,7 +93,7 @@ size_t get_instruction_buffer(unsigned char **buffer, pid_t pid, long address, s
     }
     return bytes_read;
 }
-int process_step(int pid, int steps)
+int process_step(pid_t pid, int steps)
 {
     struct user_regs_struct regs;
     if (ptrace(PTRACE_GETREGS, pid, 0, &regs) == -1)
@@ -144,7 +145,7 @@ int process_step(int pid, int steps)
     return 0;
 }
 
-void process_inspect(int pid, struct user_regs_struct *regs, breakpoint_t *breakpoint)
+void process_inspect(pid_t pid, struct user_regs_struct *regs, breakpoint_t *breakpoint)
 {
     long current_ins = ptrace(PTRACE_PEEKDATA, pid, regs->rip, 0);
     if (current_ins == -1)
@@ -175,20 +176,14 @@ void clear_breakpoints(pid_t pid)
     int total = get_num_breakpoints(breakpoints);
     for (int i = 0; i < total; i++)
     {
-        delete_breakpoint(pid, i);
+        unset_breakpoint(pid, i);
     }
     remove_all(breakpoints);
 }
 
 void delete_breakpoint(pid_t pid, int index)
 {
-    breakpoint_t *breakpoint = get_breakpoint(breakpoints, index);
-    if (breakpoint == NULL)
-        return;
-    if (ptrace(PTRACE_POKEDATA, pid, (void *)breakpoint->address, (void *)breakpoint->previous_code) == -1)
-        die("(pokedata) %s", strerror(errno));
-    if (breakpoint->address == last_hit_breakpoint->address)
-        last_hit_breakpoint = NULL;
+    unset_breakpoint(pid, index);
     remove_breakpoint(breakpoints, index);
 }
 
@@ -208,14 +203,25 @@ breakpoint_t *serve_breakpoint(pid_t pid)
     return breakpoint;
 }
 
-void reset_breakpoint(int pid, breakpoint_t *breakpoint)
+void reset_breakpoint(pid_t pid, breakpoint_t *breakpoint)
 {
     long trap = (breakpoint->previous_code & 0xFFFFFFFFFFFFFF00) | 0xCC;
     if (ptrace(PTRACE_POKEDATA, pid, (void *)breakpoint->address, (void *)trap) == -1)
         die("(pokedata) %s", strerror(errno));
 }
 
-void set_breakpoint(int pid, long addr, const char *symbol)
+void unset_breakpoint(pid_t pid, int index)
+{
+    breakpoint_t *breakpoint = get_breakpoint(breakpoints, index);
+    if (breakpoint == NULL)
+        return;
+    if (ptrace(PTRACE_POKEDATA, pid, (void *)breakpoint->address, (void *)breakpoint->previous_code) == -1)
+        die("(pokedata) %s", strerror(errno));
+    if (last_hit_breakpoint != NULL && breakpoint->address == last_hit_breakpoint->address)
+        last_hit_breakpoint = NULL;
+}
+
+void set_breakpoint(pid_t pid, long addr, const char *symbol)
 {
     /* Backup current code.  */
     long previous_code = 0;
@@ -242,7 +248,7 @@ void set_breakpoint(int pid, long addr, const char *symbol)
     }
 }
 
-int set_symbol_breakpoint(int pid, const char *symbol)
+int set_symbol_breakpoint(pid_t pid, const char *symbol)
 {
     long addr = get_symbol_value(symbol);
     if (addr == -1)
@@ -433,7 +439,7 @@ int main(int argc, char **argv)
     char *command = NULL;
     while (1)
     {
-        printf("(paphitisdb) ");
+        printf("(mdb) ");
         command = get_command(command);
         if (command == NULL)
         {
@@ -528,12 +534,16 @@ int main(int argc, char **argv)
         }
         else if (!strcmp(token, "quit"))
         {
+            free(command);
             char *dialog = malloc(100);
             sprintf(dialog, "A debugging session is active.\n\n\tInferior 1 [process %d] will be killed.\n\nQuit anyway?", pid);
-            if (child_state == EXECUTING && confirm_choice(dialog))
+            if (child_state == EXECUTING && !confirm_choice(dialog))
+            {
                 free(dialog);
+                continue;
+            }
+            free(dialog);
             break;
-            free(command);
         }
         else if (!strcmp(token, "clear"))
         {
@@ -556,4 +566,6 @@ int main(int argc, char **argv)
         free(command);
     }
     list_destroy(breakpoints);
+    destroy_disassembler();
+    destroy_elf_loader();
 }

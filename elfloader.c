@@ -34,7 +34,8 @@ char *get_symbol(long address)
       if (gelf_getshdr(scn, &shdr) != &shdr)
          die("(getshdr) %s", elf_errmsg(-1));
       /* Locate symbol table.  */
-      if (!strcmp(elf_strptr(elf, shstrndx, shdr.sh_name), ".symtab"))
+      char *section_name = elf_strptr(elf, shstrndx, shdr.sh_name);
+      if (!strcmp(section_name, ".symtab"))
       {
          data = elf_getdata(scn, NULL);
          count = shdr.sh_size / shdr.sh_entsize;
@@ -64,7 +65,8 @@ long get_symbol_value(const char *symbol)
       if (gelf_getshdr(scn, &shdr) != &shdr)
          die("(getshdr) %s", elf_errmsg(-1));
       /* Locate symbol table.  */
-      if (!strcmp(elf_strptr(elf, shstrndx, shdr.sh_name), ".symtab"))
+      char *section_name = elf_strptr(elf, shstrndx, shdr.sh_name);
+      if (!strcmp(section_name, ".symtab"))
       {
          data = elf_getdata(scn, NULL);
          count = shdr.sh_size / shdr.sh_entsize;
@@ -73,10 +75,18 @@ long get_symbol_value(const char *symbol)
          {
             GElf_Sym sym;
             gelf_getsym(data, i, &sym);
-            if (!strcmp(symbol, elf_strptr(elf, shdr.sh_link, sym.st_name)))
+            char *symbol_name = elf_strptr(elf, shdr.sh_link, sym.st_name);
+            if (!strcmp(symbol, symbol_name))
+            {
                return sym.st_value;
+            }
          }
       }
    }
    return -1;
+}
+
+void destroy_elf_loader()
+{
+   elf_end(elf);
 }
