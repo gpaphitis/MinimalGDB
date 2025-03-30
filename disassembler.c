@@ -77,7 +77,7 @@ void disas(list_t *breakpoints, unsigned char *buffer, unsigned int size, long a
             break;
          }
          if (j == 0 && offset == 0)
-            fprintf(stderr, "=> ");
+            fprintf(stderr, "> ");
          char *symbol = get_symbol(insn[j].address);
          if (symbol == NULL)
             fprintf(stderr, "\x1b[34m0x%" PRIx64 "\x1b[0m:\t", insn[j].address);
