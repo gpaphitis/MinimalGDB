@@ -375,7 +375,13 @@ char *get_command()
     char *input = malloc(60 * sizeof(char));
     if (fgets(input, 60 * sizeof(char), stdin) == NULL)
     {
-        printf("Error reading input.\n");
+        fprintf(stderr, "Error reading input.\n");
+        return NULL;
+    }
+    if (input[strlen(input) - 1] != '\n')
+    {
+        clear_input_buffer();
+        fprintf(stderr, "Input too long\n");
         return NULL;
     }
     size_t len = strlen(input);
@@ -384,6 +390,7 @@ char *get_command()
         input[len - 1] = '\0';
         return input;
     }
+    fprintf(stderr, "Enter command\n");
     return NULL;
 }
 
@@ -442,10 +449,7 @@ int main(int argc, char **argv)
         printf("(mdb) ");
         command = get_command(command);
         if (command == NULL)
-        {
-            fprintf(stderr, "Enter command\n");
             continue;
-        }
         char *token = strtok(command, " ");
         if (!strcmp(token, "r"))
         {
@@ -552,16 +556,16 @@ int main(int argc, char **argv)
         }
         else
         {
-            printf(
-                "Commands:\n"
-                "b *<address>/<symbol>\tSets breakpoint\n"
-                "l\t\t\tPrints list of set breakpoints\n"
-                "r\t\t\tChild (re)starts execution\n"
-                "c\t\t\tChild continues execution\n"
-                "si <steps>\t\tSingle steps <steps> instruction, 1 if omitted\n"
-                "d [index]\t\tDelete breakpoint at index, if not defined deletes all\n"
-                "quit\t\t\tExits\n"
-                "clear\t\t\tClears screen\n");
+            fprintf(stderr,
+                    "Commands:\n"
+                    "b *<address>/<symbol>\tSets breakpoint\n"
+                    "l\t\t\tPrints list of set breakpoints\n"
+                    "r\t\t\tChild (re)starts execution\n"
+                    "c\t\t\tChild continues execution\n"
+                    "si <steps>\t\tSingle steps <steps> instruction, 1 if omitted\n"
+                    "d [index]\t\tDelete breakpoint at index, if not defined deletes all\n"
+                    "quit\t\t\tExits\n"
+                    "clear\t\t\tClears screen\n");
         }
         free(command);
     }

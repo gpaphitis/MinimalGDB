@@ -5,3 +5,4 @@ breakpoint
 min_gdb
 my_gdb
 *.tar.gz
+*.o
