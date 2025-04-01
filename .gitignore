@@ -3,6 +3,6 @@
 *.txt
 breakpoint
 min_gdb
-my_gdb
+mdb
 *.tar.gz
 *.o

@@ -1,5 +1,5 @@
 CC = gcc
-CFLAGS = -Wall -Werror
+CFLAGS = -Wall -Werror -g
 LDFLAGS = -lelf -lcapstone
 SRC = mdb.c breakpoints.c elfloader.c disassembler.c
 OBJ = $(SRC:.c=.o)

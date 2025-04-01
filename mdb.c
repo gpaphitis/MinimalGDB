@@ -14,6 +14,8 @@
 #include <syscall.h>
 #include <sys/ptrace.h>
 #include <signal.h>
+#include <unistd.h>
+#include <limits.h>
 
 #include <fcntl.h>
 #include <libelf.h>
@@ -25,7 +27,7 @@
 #include "elfloader.h"
 #include "disassembler.h"
 
-#define TOOL "my_gdb"
+#define TOOL "mdb"
 
 #define die(...)                                \
     do                                          \
@@ -63,6 +65,9 @@ void set_breakpoint(pid_t pid, long addr, const char *symbol);
 int set_symbol_breakpoint(pid_t pid, const char *symbol);
 int continue_execution(pid_t pid);
 int execute(pid_t pid);
+void free_args(char **argv);
+size_t replace_args(char *args, char ***argv);
+char **copy_args(char **args);
 pid_t reload_child(pid_t child_pid, char **argv);
 pid_t load_child(char **argv);
 char *get_command();
@@ -342,6 +347,82 @@ int execute(pid_t pid)
     }
 }
 
+int count_args(const char *str)
+{
+    int count = 0;
+    int in_token = 0; // Track if inside a word
+
+    while (*str)
+    {
+        if (*str == ' ')
+        {
+            in_token = 0;
+        }
+        else if (!in_token)
+        {
+            in_token = 1;
+            count++;
+        }
+        str++;
+    }
+    return count;
+}
+
+void free_args(char **argv)
+{
+    if (argv == NULL)
+        return;
+    size_t size = 1;
+    while (argv[size] != NULL)
+    {
+        free(argv[size]);
+        size++;
+    }
+    free(argv);
+}
+
+size_t replace_args(char *args, char ***argv)
+{
+
+    int total_args = count_args(args);
+    char **new_argv = malloc((total_args + 3) * sizeof(char *));
+    new_argv[1] = malloc(strlen((*argv)[1]) + 1);
+    strncpy(new_argv[1], (*argv)[1], strlen((*argv)[1]));
+    new_argv[1][strlen((*argv)[1])] = '\0';
+    int i = 2;
+    char *token = strtok(args, " ");
+    while (token != NULL)
+    {
+        new_argv[i] = malloc(strlen(token) + 1);
+        strncpy(new_argv[i], token, strlen(token));
+        new_argv[i][strlen(token)] = '\0';
+        token = strtok(NULL, " ");
+        i++;
+    }
+    new_argv[total_args + 2] = NULL;
+    free_args(*argv);
+    *argv = new_argv;
+    return total_args + 2;
+}
+char **copy_args(char **args)
+{
+
+    size_t size = 1;
+    while (args[size] != NULL)
+    {
+        size++;
+    }
+    char **new_args = malloc((size + 1) * sizeof(char *));
+    for (int i = 1; i < size; i++)
+    {
+        new_args[i] = malloc(strlen(args[i]) + 1);
+        strncpy(new_args[i], args[i], strlen(args[i]));
+        new_args[i][strlen(args[i])] = '\0';
+    }
+    new_args[size] = NULL;
+    return new_args;
+}
+
 pid_t reload_child(pid_t child_pid, char **argv)
 {
     kill(child_pid, SIGKILL);
@@ -430,7 +511,7 @@ int confirm_choice(char *dialog)
 int main(int argc, char **argv)
 {
     if (argc <= 1)
-        die("my_gdb <program>: %d", argc);
+        die("mdb <program>: %d", argc);
     if (elf_version(EV_CURRENT) == EV_NONE)
         die("(version) %s", elf_errmsg(-1));
 
@@ -443,6 +524,8 @@ int main(int argc, char **argv)
     pid_t pid = load_child(argv);
 
     breakpoints = list_init();
+    char **last_args = copy_args(argv);
+    size_t args_size = argc;
     char *command = NULL;
     while (1)
     {
@@ -456,12 +539,24 @@ int main(int argc, char **argv)
             if (child_state == EXECUTING)
             {
                 if (confirm_choice("The program being debugged has been started already.\nStart it from the beginning? "))
-                    pid = reload_child(pid, argv);
+                {
+                    if (*(command + strlen(token) + 1) != '\0') // Start of arguments if they exist
+                        args_size = replace_args(command + strlen(token) + 1, &last_args);
+                    pid = reload_child(pid, last_args);
+                }
                 else
                     continue;
             }
-            else if (child_state == EXITED)
-                pid = reload_child(pid, argv);
+            else
+            {
+                if (*(command + strlen(token) + 1) != '\0') // Start of arguments if they exist
+                    args_size = replace_args(command + strlen(token) + 1, &last_args);
+                pid = reload_child(pid, last_args);
+            }
+            fprintf(stderr, "Starting program: \033[0;32m%s ", last_args[1]);
+            for (int i = 2; i < args_size; i++)
+                fprintf(stderr, "%s ", last_args[i]);
+            fprintf(stderr, "\033[0m\n");
             child_state = EXECUTING;
             if (execute(pid) == CHILD_EXIT)
                 child_state = EXITED;
@@ -497,7 +592,7 @@ int main(int argc, char **argv)
         else if (!strcmp(token, "b"))
         {
             if (child_state == EXITED)
-                pid = reload_child(pid, argv);
+                pid = reload_child(pid, last_args);
             token = strtok(NULL, " "); // Get the next token
             long address = 0;
             if (token[0] == '*')
@@ -569,6 +664,7 @@ int main(int argc, char **argv)
         }
         free(command);
     }
+    free_args(last_args);
     list_destroy(breakpoints);
     destroy_disassembler();
     destroy_elf_loader();
