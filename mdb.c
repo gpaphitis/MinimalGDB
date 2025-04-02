@@ -42,6 +42,7 @@
 #define CHILD_EXIT 2
 #define MAX_INSN_SIZE 15
 #define MAX_DISAS_INSN_COUNT 11
+#define MAX_INPUT_SIZE 60
 
 list_t *breakpoints;
 breakpoint_t *last_hit_breakpoint;
@@ -110,11 +111,27 @@ int continue_execution(pid_t pid);
  * Starts child execution.
  * Pauses at first reached breakpoint or when the child finishes.
  */
-int execute(pid_t pid);
+pid_t execute(pid_t pid);
+/**
+ * Kills currently running child and restarts it.
+ * Reapplies all currently existing breakpoints.
+ */
 pid_t reload_child(pid_t child_pid, char **argv);
+/**
+ * Loads child.
+ */
 pid_t load_child(char **argv);
+/**
+ * Gets command from user.
+ */
 char *get_command();
+/**
+ * Flushes input buffer.
+ */
 void clear_input_buffer();
+/**
+ * Displays dialog and asks for a yes or no from the user.
+ */
 int confirm_choice(char *dialog);
 
 size_t get_instruction_buffer(unsigned char **buffer, pid_t pid, long address, size_t count)
@@ -361,7 +378,7 @@ int continue_execution(pid_t pid)
     }
 }
 
-int execute(pid_t pid)
+pid_t execute(pid_t pid)
 {
     int status = 0;
     while (1)
@@ -422,25 +439,35 @@ pid_t load_child(char **argv)
 
 char *get_command()
 {
-    char *input = malloc(60 * sizeof(char));
-    if (fgets(input, 60 * sizeof(char), stdin) == NULL)
+    char *input = malloc(MAX_INPUT_SIZE * sizeof(char));
+    while (1)
     {
-        fprintf(stderr, "Error reading input.\n");
-        return NULL;
+        fprintf(stderr, "(mdb) ");
+        if (fgets(input, MAX_INPUT_SIZE * sizeof(char), stdin) == NULL)
+        {
+            memset(input, 0, MAX_INPUT_SIZE);
+            fprintf(stderr, "Error reading input.\n");
+            continue;
+        }
+
+        if (input[strlen(input) - 1] != '\n')
+        {
+            // Flush stdin to remove extra characters for next input
+            clear_input_buffer();
+            memset(input, 0, MAX_INPUT_SIZE);
+            fprintf(stderr, "Input too long\n");
+            continue;
+        }
+
+        size_t len = strlen(input);
+        if (len > 1 && input[len - 1] == '\n')
+        {
+            input[len - 1] = '\0';
+            return input;
+        }
+        // No input was given
+        fprintf(stderr, "Enter command\n");
     }
-    if (input[strlen(input) - 1] != '\n')
-    {
-        clear_input_buffer();
-        fprintf(stderr, "Input too long\n");
-        return NULL;
-    }
-    size_t len = strlen(input);
-    if (len > 1 && input[len - 1] == '\n')
-    {
-        input[len - 1] = '\0';
-        return input;
-    }
-    fprintf(stderr, "Enter command\n");
     return NULL;
 }
 
@@ -456,24 +483,20 @@ int confirm_choice(char *dialog)
     char input = '\0';
     while (1)
     {
-        fprintf(stderr, "%s", dialog);
+        fprintf(stderr, "%s ", dialog);
         fprintf(stderr, "(y or n) ");
         if (scanf(" %c", &input) != 1)
         {
             clear_input_buffer();
             continue;
         }
-
         if (input == 'y' || input == 'n')
-        {
-            clear_input_buffer();
             break;
-        }
 
-        fprintf(stderr, "Please answer y or n.\n");
-        // Clear input buffer
         clear_input_buffer();
+        fprintf(stderr, "Please answer y or n.\n");
     }
+    clear_input_buffer();
     return input == 'y' ? 1 : 0;
 }
 
@@ -498,10 +521,9 @@ int main(int argc, char **argv)
     char *command = NULL;
     while (1)
     {
-        printf("(mdb) ");
         command = get_command(command);
-        if (command == NULL)
-            continue;
+        // if (command == NULL)
+        //     continue;
         char *token = strtok(command, " ");
         if (!strcmp(token, "r"))
         {
@@ -533,7 +555,7 @@ int main(int argc, char **argv)
         else if (!strcmp(token, "c"))
         {
             if (child_state != EXECUTING)
-                printf("Program has not started or has finished\n");
+                fprintf(stderr, "Program has not started or has finished\n");
             else
             {
                 if (continue_execution(pid) == CHILD_EXIT)
@@ -543,16 +565,20 @@ int main(int argc, char **argv)
         else if (!strcmp(token, "si"))
         {
             if (child_state != EXECUTING)
-                printf("Program has not started or has finished\n");
+                fprintf(stderr, "Program has not started or has finished\n");
             else
             {
                 char *error = NULL;
                 token = strtok(NULL, " ");
-                int steps = strtol(token, &error, 10);
-                if (*error != '\0')
+                int steps = 1;
+                if (token != NULL)
                 {
-                    fprintf(stderr, "Enter a valid number\n");
-                    continue;
+                    steps = strtol(token, &error, 10);
+                    if (*error != '\0')
+                    {
+                        fprintf(stderr, "Enter a valid number\n");
+                        continue;
+                    }
                 }
                 if (process_step(pid, steps) == CHILD_EXIT)
                     child_state = EXITED;
@@ -573,7 +599,7 @@ int main(int argc, char **argv)
             else
             {
                 if (set_symbol_breakpoint(pid, token) == -1)
-                    printf("Function \"%s\" not defined.\n", token);
+                    fprintf(stderr, "Function \"%s\" not defined.\n", token);
             }
         }
         else if (!strcmp(token, "l"))

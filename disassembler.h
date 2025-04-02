@@ -8,11 +8,18 @@
 #include "breakpoints.h"
 #include "elfloader.h"
 
+/**
+ * Initializes Capstone engine.
+ */
 int initialize_disassembler();
-int is_cs_cflow_group(uint8_t g);
-int is_cs_cflow_ins(cs_insn *ins);
-uint64_t get_cs_ins_immediate_target(cs_insn *ins);
+/**
+ * Disassembles at most specified amount of instructions from buffer or until end of function is found.
+ * If breakpoint is found then replaces with original opcode 
+ */
 void disas(list_t *breakpoints, unsigned char *buffer, unsigned int size, long address, long offset, int count);
+/**
+ * Frees all used resources.
+ */
 void destroy_disassembler();
 
 #endif
