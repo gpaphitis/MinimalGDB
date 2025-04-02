@@ -26,6 +26,7 @@
 #include "breakpoints.h"
 #include "elfloader.h"
 #include "disassembler.h"
+#include "arguments.h"
 
 #define TOOL "mdb"
 
@@ -52,22 +53,64 @@ enum child_state_t
     EXITED
 } child_state;
 
+/**
+ * Creates a buffer for at least count instructions starting from address.
+ */
 size_t get_instruction_buffer(unsigned char **buffer, pid_t pid, long address, size_t count);
+/**
+ * Single step over specified number of steps and disassembles at the end.
+ */
 int process_step(pid_t pid, int steps);
+/**
+ * Disassembles following instructions from breakpoint reached.
+ */
 void process_inspect(pid_t pid, struct user_regs_struct *regs, breakpoint_t *breakpoint);
+/**
+ * Checks if execution was paused due to a software breakpoint.
+ */
 int check_if_breakpoint(pid_t pid, struct user_regs_struct *regs);
+/**
+ * Unsets all breakpoints.
+ */
 void clear_breakpoints(pid_t pid);
+/**
+ * Deletes breakpoint at index.
+ */
 void delete_breakpoint(pid_t pid, int index);
+/**
+ * Processes breakpoint execution paused on.
+ * Prints breakpoint information, disassembles and switches breakpoint with original code.
+ */
 breakpoint_t *serve_breakpoint(pid_t pid);
+/**
+ * Reapplies breakpoint to instruction stream.
+ */
 void reset_breakpoint(pid_t pid, breakpoint_t *breakpoint);
+/**
+ * Removes breakpoint at index from instruction stream.
+ */
 void unset_breakpoint(pid_t pid, int index);
+/**
+ * Creates and sets new breakpoint at address.
+ * If symbol is not given then it tries to find symbol associated with address.
+ */
 void set_breakpoint(pid_t pid, long addr, const char *symbol);
+/**
+ * Creates and sets new breakpoint at given symbol.
+ * If symbol doesn't exist then returns -1.
+ */
 int set_symbol_breakpoint(pid_t pid, const char *symbol);
+/**
+ * Continues child execution.
+ * Reapplies breakpoint execution paused on and pauses at the next reached breakpoint
+ * or when the child finishes.
+ */
 int continue_execution(pid_t pid);
+/**
+ * Starts child execution.
+ * Pauses at first reached breakpoint or when the child finishes.
+ */
 int execute(pid_t pid);
-void free_args(char **argv);
-size_t replace_args(char *args, char ***argv);
-char **copy_args(char **args);
 pid_t reload_child(pid_t child_pid, char **argv);
 pid_t load_child(char **argv);
 char *get_command();
@@ -80,7 +123,6 @@ size_t get_instruction_buffer(unsigned char **buffer, pid_t pid, long address, s
     size_t bytes_read = 0;
     while (bytes_read < MAX_INSN_SIZE * count)
     {
-        // Read a word (sizeof(long)) from the child process memory
         long word = ptrace(PTRACE_PEEKDATA, pid, address + bytes_read, NULL);
         if (word == -1 && errno != 0)
         {
@@ -98,6 +140,7 @@ size_t get_instruction_buffer(unsigned char **buffer, pid_t pid, long address, s
     }
     return bytes_read;
 }
+
 int process_step(pid_t pid, int steps)
 {
     struct user_regs_struct regs;
@@ -117,7 +160,7 @@ int process_step(pid_t pid, int steps)
         // About to execute a breakpoint
         if (reached_breakpoint != NULL)
         {
-            // Replace breakpoint with actual code, execute it and reset the breakpoint
+            // Replace breakpoint with actual code, execute and reset the breakpoint
             if (ptrace(PTRACE_POKEDATA, pid, (void *)reached_breakpoint->address, (void *)reached_breakpoint->previous_code) == -1)
                 die("(pokedata) %s", strerror(errno));
             if (ptrace(PTRACE_SINGLESTEP, pid, 0, 0) == -1)
@@ -134,9 +177,9 @@ int process_step(pid_t pid, int steps)
 
         if (ptrace(PTRACE_GETREGS, pid, 0, &regs) == -1)
         {
+            /* System call was exit; so we need to end.  */
             if (errno == ESRCH)
             {
-                /* System call was exit; so we need to end.  */
                 fprintf(stderr, "\n");
                 return CHILD_EXIT;
             }
@@ -152,13 +195,6 @@ int process_step(pid_t pid, int steps)
 
 void process_inspect(pid_t pid, struct user_regs_struct *regs, breakpoint_t *breakpoint)
 {
-    long current_ins = ptrace(PTRACE_PEEKDATA, pid, regs->rip, 0);
-    if (current_ins == -1)
-        die("(peekdata) %s", strerror(errno));
-    fprintf(stderr, "Breakpoint \x1b[34m0x%lx\x1b[0m", breakpoint->address);
-    if (breakpoint->symbol != NULL)
-        fprintf(stderr, " in \x1b[33m%s\x1b[0m", breakpoint->symbol);
-    fprintf(stderr, "\n");
     unsigned char *buffer = NULL;
     size_t bytes_read = get_instruction_buffer(&buffer, pid, breakpoint->address, MAX_DISAS_INSN_COUNT);
     disas(breakpoints, (unsigned char *)buffer, bytes_read, breakpoint->address, 0, MAX_DISAS_INSN_COUNT);
@@ -173,6 +209,7 @@ int check_if_breakpoint(pid_t pid, struct user_regs_struct *regs)
         die("(peekdata) %s", strerror(errno));
     current_ins &= 0x00000000000000FF;
 
+    // Check if opcode is a software breakpoint
     return current_ins == 0xcc;
 }
 
@@ -183,7 +220,7 @@ void clear_breakpoints(pid_t pid)
     {
         unset_breakpoint(pid, i);
     }
-    remove_all(breakpoints);
+    remove_all_breakpoints(breakpoints);
 }
 
 void delete_breakpoint(pid_t pid, int index)
@@ -199,11 +236,18 @@ breakpoint_t *serve_breakpoint(pid_t pid)
         die("(getregs) %s", strerror(errno));
 
     breakpoint_t *breakpoint = get_breakpoint_by_address(breakpoints, regs.rip - 1);
+    fprintf(stderr, "Breakpoint \x1b[34m0x%lx\x1b[0m", breakpoint->address);
+    if (breakpoint->symbol != NULL)
+        fprintf(stderr, " in \x1b[33m%s\x1b[0m", breakpoint->symbol);
+    fprintf(stderr, "\n");
+
+    // Replace breakpoint with original instruction and RIP to corrected instruction
     if (ptrace(PTRACE_POKEDATA, pid, (void *)breakpoint->address, (void *)breakpoint->previous_code) == -1)
         die("(pokedata) %s", strerror(errno));
     regs.rip = breakpoint->address;
     if (ptrace(PTRACE_SETREGS, pid, 0, &regs) == -1)
         die("(setregs) %s", strerror(errno));
+
     process_inspect(pid, &regs, breakpoint);
     return breakpoint;
 }
@@ -237,6 +281,7 @@ void set_breakpoint(pid_t pid, long addr, const char *symbol)
         fprintf(stderr, "Cannot set breakpoint at \x1b[34m0x%lx\x1b[0m\n", addr);
         return;
     }
+
     // If symbol not given, try and find it
     symbol = (symbol != NULL) ? symbol : get_symbol(addr);
     int index = add_breakpoint(breakpoints, addr, previous_code, symbol);
@@ -246,11 +291,13 @@ void set_breakpoint(pid_t pid, long addr, const char *symbol)
         if (symbol != NULL)
             fprintf(stderr, " \x1b[33m<%s>\x1b[0m", symbol);
         fprintf(stderr, "\n");
-        /* Insert the breakpoint. */
+
         long trap = (previous_code & 0xFFFFFFFFFFFFFF00) | 0xCC;
         if (ptrace(PTRACE_POKEDATA, pid, (void *)addr, (void *)trap) == -1)
             die("set_breakpoint(pokedata) %s", strerror(errno));
     }
+    else
+        fprintf(stderr, "Cannot set breakpoint at \x1b[34m0x%lx\x1b[0m\n", addr);
 }
 
 int set_symbol_breakpoint(pid_t pid, const char *symbol)
@@ -267,9 +314,9 @@ int continue_execution(pid_t pid)
     struct user_regs_struct regs;
     if (ptrace(PTRACE_GETREGS, pid, 0, &regs) == -1)
     {
+        /* System call was exit; so we need to end.  */
         if (errno == ESRCH)
         {
-            /* System call was exit; so we need to end.  */
             fprintf(stderr, "\n");
             return CHILD_EXIT;
         }
@@ -277,7 +324,7 @@ int continue_execution(pid_t pid)
     }
     if (last_hit_breakpoint != NULL)
     {
-        // Execute instruction execution paused on
+        // We are continuing from the breakpoint we paused on so fix it and execute
         if (regs.rip == last_hit_breakpoint->address)
         {
             if (ptrace(PTRACE_SINGLESTEP, pid, 0, 0) == -1)
@@ -285,7 +332,7 @@ int continue_execution(pid_t pid)
             waitpid(pid, 0, 0);
         }
 
-        // Reset breakpoint at that address
+        // Reset last hit breakpoint breakpoint
         reset_breakpoint(pid, last_hit_breakpoint);
     }
     int status = 0;
@@ -293,16 +340,14 @@ int continue_execution(pid_t pid)
     {
         if (ptrace(PTRACE_CONT, pid, 0, 0) == -1)
             die("%s", strerror(errno));
-        /* Block until process state change (i.e., next event). */
         if (waitpid(pid, &status, 0) == -1)
             die("%s", strerror(errno));
 
-        /* Collect information about the system call.  */
         if (ptrace(PTRACE_GETREGS, pid, 0, &regs) == -1)
         {
+            /* System call was exit; so we need to end.  */
             if (errno == ESRCH)
             {
-                /* System call was exit; so we need to end.  */
                 fprintf(stderr, "\n");
                 return CHILD_EXIT;
             }
@@ -345,82 +390,6 @@ int execute(pid_t pid)
             return CHILD_BREAKPOINT;
         }
     }
-}
-
-int count_args(const char *str)
-{
-    int count = 0;
-    int in_token = 0; // Track if inside a word
-
-    while (*str)
-    {
-        if (*str == ' ')
-        {
-            in_token = 0;
-        }
-        else if (!in_token)
-        {
-            in_token = 1;
-            count++;
-        }
-        str++;
-    }
-    return count;
-}
-
-void free_args(char **argv)
-{
-    if (argv == NULL)
-        return;
-    size_t size = 1;
-    while (argv[size] != NULL)
-    {
-        free(argv[size]);
-        size++;
-    }
-    free(argv);
-}
-
-size_t replace_args(char *args, char ***argv)
-{
-
-    int total_args = count_args(args);
-    char **new_argv = malloc((total_args + 3) * sizeof(char *));
-    new_argv[1] = malloc(strlen((*argv)[1]) + 1);
-    strncpy(new_argv[1], (*argv)[1], strlen((*argv)[1]));
-    new_argv[1][strlen((*argv)[1])] = '\0';
-    int i = 2;
-    char *token = strtok(args, " ");
-    while (token != NULL)
-    {
-        new_argv[i] = malloc(strlen(token) + 1);
-        strncpy(new_argv[i], token, strlen(token));
-        new_argv[i][strlen(token)] = '\0';
-        token = strtok(NULL, " ");
-        i++;
-    }
-    new_argv[total_args + 2] = NULL;
-    free_args(*argv);
-    *argv = new_argv;
-    return total_args + 2;
-}
-char **copy_args(char **args)
-{
-
-    size_t size = 1;
-    while (args[size] != NULL)
-    {
-        size++;
-    }
-    char **new_args = malloc((size + 1) * sizeof(char *));
-    for (int i = 1; i < size; i++)
-    {
-        new_args[i] = malloc(strlen(args[i]) + 1);
-        strncpy(new_args[i], args[i], strlen(args[i]));
-        new_args[i][strlen(args[i])] = '\0';
-    }
-    new_args[size] = NULL;
-    return new_args;
 }
 
 pid_t reload_child(pid_t child_pid, char **argv)
@@ -524,7 +493,7 @@ int main(int argc, char **argv)
     pid_t pid = load_child(argv);
 
     breakpoints = list_init();
-    char **last_args = copy_args(argv);
+    char **current_args = copy_args(argv);
     size_t args_size = argc;
     char *command = NULL;
     while (1)
@@ -540,22 +509,22 @@ int main(int argc, char **argv)
             {
                 if (confirm_choice("The program being debugged has been started already.\nStart it from the beginning? "))
                 {
-                    if (*(command + strlen(token) + 1) != '\0') // Start of arguments if they exist
-                        args_size = replace_args(command + strlen(token) + 1, &last_args);
-                    pid = reload_child(pid, last_args);
+                    if (*(command + strlen(token) + 1) != '\0')
+                        args_size = replace_args(command + strlen(token) + 1, &current_args);
+                    pid = reload_child(pid, current_args);
                 }
                 else
                     continue;
             }
             else
             {
-                if (*(command + strlen(token) + 1) != '\0') // Start of arguments if they exist
-                    args_size = replace_args(command + strlen(token) + 1, &last_args);
-                pid = reload_child(pid, last_args);
+                if (*(command + strlen(token) + 1) != '\0')
+                    args_size = replace_args(command + strlen(token) + 1, &current_args);
+                pid = reload_child(pid, current_args);
             }
-            fprintf(stderr, "Starting program: \033[0;32m%s ", last_args[1]);
+            fprintf(stderr, "Starting program: \033[0;32m%s ", current_args[1]);
             for (int i = 2; i < args_size; i++)
-                fprintf(stderr, "%s ", last_args[i]);
+                fprintf(stderr, "%s ", current_args[i]);
             fprintf(stderr, "\033[0m\n");
             child_state = EXECUTING;
             if (execute(pid) == CHILD_EXIT)
@@ -592,7 +561,7 @@ int main(int argc, char **argv)
         else if (!strcmp(token, "b"))
         {
             if (child_state == EXITED)
-                pid = reload_child(pid, last_args);
+                pid = reload_child(pid, current_args);
             token = strtok(NULL, " "); // Get the next token
             long address = 0;
             if (token[0] == '*')
@@ -613,7 +582,7 @@ int main(int argc, char **argv)
         {
             token = strtok(NULL, " "); // Get the next token
             if (token == NULL)
-                clear_breakpoints(pid);
+                child_state == EXITED ? remove_all_breakpoints(breakpoints) : clear_breakpoints(pid);
             else
             {
                 char *error = NULL;
@@ -628,6 +597,8 @@ int main(int argc, char **argv)
                     fprintf(stderr, "Index out of bounds\n");
                     continue;
                 }
+                if (child_state == EXITED)
+                    remove_breakpoint(breakpoints, index);
                 delete_breakpoint(pid, index);
             }
         }
@@ -655,7 +626,7 @@ int main(int argc, char **argv)
                     "Commands:\n"
                     "b *<address>/<symbol>\tSets breakpoint\n"
                     "l\t\t\tPrints list of set breakpoints\n"
-                    "r\t\t\tChild (re)starts execution\n"
+                    "r <args>\t\tChild (re)starts execution with given arguments. If arguments are omitted, previous ones will be used\n"
                     "c\t\t\tChild continues execution\n"
                     "si <steps>\t\tSingle steps <steps> instruction, 1 if omitted\n"
                     "d [index]\t\tDelete breakpoint at index, if not defined deletes all\n"
@@ -664,7 +635,7 @@ int main(int argc, char **argv)
         }
         free(command);
     }
-    free_args(last_args);
+    free_args(current_args);
     list_destroy(breakpoints);
     destroy_disassembler();
     destroy_elf_loader();

@@ -96,7 +96,7 @@ void clear_breakpoint(node_t *current)
    free(current);
 }
 
-void remove_all(list_t *list)
+void remove_all_breakpoints(list_t *list)
 {
    if (list->head == NULL)
       return;
@@ -108,7 +108,7 @@ void remove_all(list_t *list)
 
 void list_destroy(list_t *list)
 {
-   remove_all(list);
+   remove_all_breakpoints(list);
    free(list);
 }
 
