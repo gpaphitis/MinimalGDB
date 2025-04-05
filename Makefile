@@ -5,7 +5,7 @@ SRC = mdb.c breakpoints.c elfloader.c disassembler.c arguments.c
 OBJ = $(SRC:.c=.o)
 TARGET = mdb
 TARBALL = mdb_UC1065009.tar.gz
-FILES = mdb.c breakpoints.c disassembler.c elfloader.c arguments.c Makefile
+FILES = mdb.c breakpoints.c disassembler.c elfloader.c arguments.c breakpoints.h disassembler.h elfloader.h arguments.h Makefile
 
 all: $(TARGET)
 

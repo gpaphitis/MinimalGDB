@@ -428,7 +428,17 @@ pid_t load_child(char **argv)
         die("%s", strerror(errno));
     case 0:
         ptrace(PTRACE_TRACEME, 0, 0, 0);
-        execvp(argv[1], argv + 1);
+
+        char *file = argv[1];
+        // If no '/' in filename, assume it's in current dir
+        if (!strchr(file, '/'))
+        {
+            char *path = malloc(strlen(file) + 3);
+            sprintf(path, "./%s", file);
+            file = path;
+        }
+        execvp(file, argv + 1);
+        free(file);
         die("%s", strerror(errno));
     }
     waitpid(pid, 0, 0);
