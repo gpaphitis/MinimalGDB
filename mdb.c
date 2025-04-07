@@ -269,6 +269,17 @@ breakpoint_t *serve_breakpoint(pid_t pid)
     return breakpoint;
 }
 
+void disassemble_position(pid_t pid)
+{
+    struct user_regs_struct regs;
+    if (ptrace(PTRACE_GETREGS, pid, 0, &regs) == -1)
+        die("(getregs) %s", strerror(errno));
+    unsigned char *buffer = NULL;
+    size_t bytes_read = get_instruction_buffer(&buffer, pid, regs.rip, MAX_DISAS_INSN_COUNT);
+    disas(breakpoints, (unsigned char *)buffer, bytes_read, regs.rip, 0, MAX_DISAS_INSN_COUNT);
+    free(buffer);
+}
+
 void reset_breakpoint(pid_t pid, breakpoint_t *breakpoint)
 {
     long trap = (breakpoint->previous_code & 0xFFFFFFFFFFFFFF00) | 0xCC;
@@ -532,8 +543,6 @@ int main(int argc, char **argv)
     while (1)
     {
         command = get_command(command);
-        // if (command == NULL)
-        //     continue;
         char *token = strtok(command, " ");
         if (!strcmp(token, "r"))
         {
@@ -637,6 +646,10 @@ int main(int argc, char **argv)
                     remove_breakpoint(breakpoints, index);
                 delete_breakpoint(pid, index);
             }
+        }
+        else if (!strcmp(token, "disas"))
+        {
+            disassemble_position(pid);
         }
         else if (!strcmp(token, "quit"))
         {
