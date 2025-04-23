@@ -33,7 +33,9 @@ Every time execution pauses (due to a breakpoint or single step), `mdb` automati
 - Libelf
 
 ## Build
+```bash
 make
+```
 
 ## Notes
 - `mdb` currently supports ELF binaries and provides basic breakpoint and stepping functionality.
