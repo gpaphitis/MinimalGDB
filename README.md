@@ -28,7 +28,6 @@ You can interact with `mdb` using the following commands:
 Every time execution pauses (due to a breakpoint or single step), `mdb` automatically disassembles and displays 10 instructions starting from the current instruction pointer.
 
 ## Requirements
-- Linux
 - Capstone
 - Libelf
 
