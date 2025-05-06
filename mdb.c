@@ -43,6 +43,7 @@
 #define MAX_INSN_SIZE 15
 #define MAX_DISAS_INSN_COUNT 11
 #define MAX_INPUT_SIZE 60
+#define WORD_LENGTH 60
 
 list_t *breakpoints;
 breakpoint_t *last_hit_breakpoint;
@@ -101,6 +102,14 @@ void set_breakpoint(pid_t pid, long addr, const char *symbol);
  * If symbol doesn't exist then returns -1.
  */
 int set_symbol_breakpoint(pid_t pid, const char *symbol);
+/**
+ * Prints register values
+ */
+void print_registers(pid_t pid);
+/**
+ * Prints words from memory
+ */
+void print_memory(pid_t pid, uint64_t start_address, uint64_t num_words);
 /**
  * Continues child execution.
  * Reapplies breakpoint execution paused on and pauses at the next reached breakpoint
@@ -337,6 +346,79 @@ int set_symbol_breakpoint(pid_t pid, const char *symbol)
     return 0;
 }
 
+void print_registers(pid_t pid)
+{
+    struct user_regs_struct regs;
+    if (ptrace(PTRACE_GETREGS, pid, 0, &regs) == -1)
+    {
+        if (errno == ESRCH)
+        {
+            return;
+        }
+        die("%s", strerror(errno));
+    }
+    printf("rax\t\t0x%-20llx%llu\n", regs.rax, regs.rax);
+    printf("rbx\t\t0x%-20llx%llu\n", regs.rbx, regs.rbx);
+    printf("rcx\t\t0x%-20llx%llu\n", regs.rcx, regs.rcx);
+    printf("rdx\t\t0x%-20llx%llu\n", regs.rdx, regs.rdx);
+    printf("rsi\t\t0x%-20llx%llu\n", regs.rsi, regs.rsi);
+    printf("rdi\t\t0x%-20llx%llu\n", regs.rdi, regs.rdi);
+    printf("rbp\t\t0x%-20llx%llu\n", regs.rbp, regs.rbp);
+    printf("rsp\t\t0x%-20llx%llu\n", regs.rsp, regs.rsp);
+    printf("r8\t\t0x%-20llx%llu\n", regs.r8, regs.r8);
+    printf("r9\t\t0x%-20llx%llu\n", regs.r9, regs.r9);
+    printf("r10\t\t0x%-20llx%llu\n", regs.r10, regs.r10);
+    printf("r10\t\t0x%-20llx%llu\n", regs.r10, regs.r10);
+    printf("r11\t\t0x%-20llx%llu\n", regs.r11, regs.r11);
+    printf("r12\t\t0x%-20llx%llu\n", regs.r12, regs.r12);
+    printf("r13\t\t0x%-20llx%llu\n", regs.r13, regs.r13);
+    printf("r14\t\t0x%-20llx%llu\n", regs.r14, regs.r14);
+    printf("r15\t\t0x%-20llx%llu\n", regs.r15, regs.r15);
+    printf("rip\t\t0x%-20llx%llu\n", regs.rip, regs.rip);
+    printf("eflags\t\t0x%-20llx\n", regs.eflags);
+    printf("cs\t\t0x%-20llx%llu\n", regs.cs, regs.cs);
+    printf("ss\t\t0x%-20llx%llu\n", regs.ss, regs.ss);
+    printf("ds\t\t0x%-20llx%llu\n", regs.ds, regs.ds);
+    printf("es\t\t0x%-20llx%llu\n", regs.es, regs.es);
+    printf("fs\t\t0x%-20llx%llu\n", regs.fs, regs.fs);
+    printf("gs\t\t0x%-20llx%llu\n", regs.gs, regs.gs);
+    printf("fs_base\t\t0x%-20llx%llu\n", regs.fs_base, regs.fs_base);
+    printf("gs_base\t\t0x%-20llx%llu\n", regs.gs_base, regs.gs_base);
+}
+
+void print_memory(pid_t pid, uint64_t start_address, uint64_t num_words)
+{
+    uint64_t buffer_size = WORD_LENGTH * num_words;
+    uint8_t *buffer = (uint8_t *)malloc(buffer_size);
+    size_t bytes_read = 0;
+    while (bytes_read < buffer_size)
+    {
+        long word = ptrace(PTRACE_PEEKDATA, pid, start_address + bytes_read, NULL);
+        if (word == -1 && errno != 0)
+        {
+            free(buffer);
+            die("(peekdata) %s", strerror(errno));
+        }
+
+        // Copy the word to the buffer byte-by-byte
+        for (size_t i = 0; i < sizeof(word) && bytes_read + i < buffer_size; i++)
+        {
+            buffer[bytes_read + i] = (word >> (i * 8)) & 0xFF;
+        }
+
+        bytes_read += sizeof(word);
+    }
+    for (int i = 0; i < num_words; i++)
+    {
+        printf("0x%lx\t", start_address + i * WORD_LENGTH);
+        uint32_t word = 0;
+        for (int j = 0; j < WORD_LENGTH; j++)
+            word |= ((uint32_t)buffer[i * WORD_LENGTH + j]) << (j * 8);
+        printf("0x%x\n", word);
+    }
+    free(buffer);
+}
+
 int continue_execution(pid_t pid)
 {
     struct user_regs_struct regs;
@@ -542,7 +624,7 @@ int main(int argc, char **argv)
     char *command = NULL;
     while (1)
     {
-        command = get_command(command);
+        command = get_command();
         char *token = strtok(command, " ");
         if (!strcmp(token, "r"))
         {
@@ -621,8 +703,21 @@ int main(int argc, char **argv)
                     fprintf(stderr, "Function \"%s\" not defined.\n", token);
             }
         }
-        else if (!strcmp(token, "l"))
-            print_list(breakpoints);
+        else if (!strcmp(token, "i"))
+        {
+            token = strtok(NULL, " ");
+            if (!strcmp(token, "b"))
+                print_list(breakpoints);
+            else if (!strcmp(token, "r"))
+            {
+                if (child_state != EXECUTING)
+                {
+                    printf("he program has no registers now.\n");
+                    continue;
+                }
+                print_registers(pid);
+            }
+        }
         else if (!strcmp(token, "d"))
         {
             token = strtok(NULL, " "); // Get the next token
@@ -646,6 +741,51 @@ int main(int argc, char **argv)
                     remove_breakpoint(breakpoints, index);
                 delete_breakpoint(pid, index);
             }
+        }
+        else if (token[0] == 'x')
+        {
+            char *inner_token = token;
+            token = strtok(NULL, " ");
+            inner_token = strtok(inner_token, "/");
+            if (strcmp(inner_token, "x")) // Check that there is only 'x' before /
+            {
+                printf("Incorrect syntax\n");
+                continue;
+            }
+            inner_token = strtok(NULL, "/");
+            if (inner_token == NULL) // Check that there is only 'x' before /
+            {
+                printf("Incorrect syntax\n");
+                continue;
+            }
+            int i = 0;
+            int words = 0;
+            while (i < strlen(inner_token) && inner_token[i] >= '0' && inner_token[i] <= '9')
+            {
+                if (words > 0)
+                    words *= 10;
+                words = words + (int)(inner_token[i] - '0');
+                i++;
+            }
+            if (words == 0 || i < strlen(inner_token))
+            {
+                printf("Incorrect syntax\n");
+                continue;
+            }
+            if (token == NULL)
+            {
+                printf("Incorrect syntax\n");
+                continue;
+            }
+
+            char *error = NULL;
+            uint64_t start_address = strtol(token, &error, 16);
+            if (*error != '\0')
+            {
+                fprintf(stderr, "Enter a valid address\n");
+                continue;
+            }
+            print_memory(pid, start_address, words);
         }
         else if (!strcmp(token, "disas"))
         {
@@ -674,7 +814,7 @@ int main(int argc, char **argv)
             fprintf(stderr,
                     "Commands:\n"
                     "b *<address>/<symbol>\tSets breakpoint\n"
-                    "l\t\t\tPrints list of set breakpoints\n"
+                    "i [i|b]\t\t\tPrints list of set breakpoints[b] or register values[r]\n"
                     "r <args>\t\tChild (re)starts execution with given arguments. If arguments are omitted, previous ones will be used\n"
                     "c\t\t\tChild continues execution\n"
                     "si <steps>\t\tSingle steps <steps> instruction, 1 if omitted\n"

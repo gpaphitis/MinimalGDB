@@ -6,3 +6,5 @@ min_gdb
 mdb
 *.tar.gz
 *.o
+test*
+valgrind*

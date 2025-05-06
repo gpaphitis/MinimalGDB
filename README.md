@@ -12,12 +12,12 @@ This is the main title of the README
 ## Commands
 You can interact with `mdb` using the following commands:
 | Command               | Description |
-|------------------------|-------------|
+|-----------------------|-------------|
 | `h`                   | Prints the help menu. |
 | `r [args]`            | Reruns the program with optional `args`. If no arguments are given, the previous arguments are reused. |
 | `c`                   | Continues execution from the current location. |
-| `b 0*<addr>/symbol`   | Sets a breakpoint at a given address (hex, e.g., `0x400123`) or symbol. |
-| `l`                   | Lists all set breakpoints. |
+| `b *0x<addr>/symbol`  | Sets a breakpoint at a given address (hex, e.g., `0x400123`) or symbol. |
+| `i [r\|b]`             | Prints list of set breakpoints(b) or register values(r). |
 | `d [breakpoint]`      | Deletes the given breakpoint. If no argument is provided, deletes all breakpoints. |
 | `si [steps]`          | Single-steps the specified number of steps. Defaults to 1 if not specified. |
 | `disas`               | Disassembles 10 instructions from the current instruction pointer. |
