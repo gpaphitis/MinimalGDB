@@ -7,7 +7,7 @@
 typedef struct
 {
    long address;
-   long previous_code;
+   unsigned char previous_code;
    char *symbol;
 } breakpoint_t;
 
@@ -30,7 +30,7 @@ list_t *list_init();
 /**
  * Creates and adds new breakpoint.
  */
-int add_breakpoint(list_t *list, long address, long previous_code, const char *symbol);
+int add_breakpoint(list_t *list, long address, unsigned char previous_code, const char *symbol);
 /**
  * Removes breakpoint from.
  */

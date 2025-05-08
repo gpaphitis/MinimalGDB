@@ -1,7 +1,7 @@
 CC = gcc
 CFLAGS = -Wall -Werror -g
 LDFLAGS = -lelf -lcapstone
-SRC = mdb.c breakpoints.c elfloader.c disassembler.c arguments.c
+SRC = mdb.c breakpoints.c elfloader.c disassembler.c inputparser.c
 OBJ = $(SRC:.c=.o)
 TARGET = mdb
 

@@ -8,7 +8,7 @@ list_t *list_init()
    return list;
 }
 
-int add_breakpoint(list_t *list, long address, long previous_code, const char *symbol)
+int add_breakpoint(list_t *list, long address, unsigned char previous_code, const char *symbol)
 {
    if (get_breakpoint_by_address(list, address) != NULL)
       return -1;

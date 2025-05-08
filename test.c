@@ -8,9 +8,9 @@ void foo(void)
 int main(int argc, char *argv[])
 {
 
+    long placemarker = 0xdeadbeef;
     foo();
     foo();
-
     if (argc > 1)
         printf("%s\n", argv[1]);
     if (argc > 2)

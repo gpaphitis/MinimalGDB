@@ -26,7 +26,9 @@
 #include "breakpoints.h"
 #include "elfloader.h"
 #include "disassembler.h"
-#include "arguments.h"
+// #include "arguments.h"
+#include "inputparser.h"
+#include "definitions.h"
 
 #define TOOL "mdb"
 
@@ -43,17 +45,11 @@
 #define MAX_INSN_SIZE 15
 #define MAX_DISAS_INSN_COUNT 11
 #define MAX_INPUT_SIZE 60
-#define WORD_LENGTH 60
+#define WORD_LENGTH 0x4
 
 list_t *breakpoints;
 breakpoint_t *last_hit_breakpoint;
-
-enum child_state_t
-{
-    LOADED,
-    EXECUTING,
-    EXITED
-} child_state;
+child_state_t child_state;
 
 /**
  * Creates a buffer for at least count instructions starting from address.
@@ -133,15 +129,11 @@ pid_t load_child(char **argv);
 /**
  * Gets command from user.
  */
-char *get_command();
+char *get_input();
 /**
  * Flushes input buffer.
  */
 void clear_input_buffer();
-/**
- * Displays dialog and asks for a yes or no from the user.
- */
-int confirm_choice(char *dialog);
 
 size_t get_instruction_buffer(unsigned char **buffer, pid_t pid, long address, size_t count)
 {
@@ -186,8 +178,14 @@ int process_step(pid_t pid, int steps)
         // About to execute a breakpoint
         if (reached_breakpoint != NULL)
         {
+            long current_code = ptrace(PTRACE_PEEKDATA, pid, (void *)reached_breakpoint->address, 0);
+            if (current_code == -1)
+            {
+                fprintf(stderr, "Cannot access memory at \x1b[34m0x%lx\x1b[0m\n", reached_breakpoint->address);
+                die("(peekdata) %s", strerror(errno));
+            }
             // Replace breakpoint with actual code, execute and reset the breakpoint
-            if (ptrace(PTRACE_POKEDATA, pid, (void *)reached_breakpoint->address, (void *)reached_breakpoint->previous_code) == -1)
+            if (ptrace(PTRACE_POKEDATA, pid, (void *)reached_breakpoint->address, (void *)((current_code & 0xFFFFFFFFFFFFFF00) | reached_breakpoint->previous_code)) == -1)
                 die("(pokedata) %s", strerror(errno));
             if (ptrace(PTRACE_SINGLESTEP, pid, 0, 0) == -1)
                 die("(singlestep) %s", strerror(errno));
@@ -267,8 +265,14 @@ breakpoint_t *serve_breakpoint(pid_t pid)
         fprintf(stderr, " in \x1b[33m%s\x1b[0m", breakpoint->symbol);
     fprintf(stderr, "\n");
 
+    long current_code = ptrace(PTRACE_PEEKDATA, pid, (void *)breakpoint->address, 0);
+    if (current_code == -1)
+    {
+        fprintf(stderr, "Cannot access memory at \x1b[34m0x%lx\x1b[0m\n", breakpoint->address);
+        die("(peekdata) %s", strerror(errno));
+    }
     // Replace breakpoint with original instruction and RIP to corrected instruction
-    if (ptrace(PTRACE_POKEDATA, pid, (void *)breakpoint->address, (void *)breakpoint->previous_code) == -1)
+    if (ptrace(PTRACE_POKEDATA, pid, (void *)breakpoint->address, (void *)((current_code & 0xFFFFFFFFFFFFFF00) | breakpoint->previous_code)) == -1)
         die("(pokedata) %s", strerror(errno));
     regs.rip = breakpoint->address;
     if (ptrace(PTRACE_SETREGS, pid, 0, &regs) == -1)
@@ -291,7 +295,13 @@ void disassemble_position(pid_t pid)
 
 void reset_breakpoint(pid_t pid, breakpoint_t *breakpoint)
 {
-    long trap = (breakpoint->previous_code & 0xFFFFFFFFFFFFFF00) | 0xCC;
+    long current_code = ptrace(PTRACE_PEEKDATA, pid, (void *)breakpoint->address, 0);
+    if (current_code == -1)
+    {
+        fprintf(stderr, "Cannot access memory at \x1b[34m0x%lx\x1b[0m\n", breakpoint->address);
+        return;
+    }
+    long trap = (current_code & 0xFFFFFFFFFFFFFF00) | 0xCC;
     if (ptrace(PTRACE_POKEDATA, pid, (void *)breakpoint->address, (void *)trap) == -1)
         die("(pokedata) %s", strerror(errno));
 }
@@ -301,7 +311,13 @@ void unset_breakpoint(pid_t pid, int index)
     breakpoint_t *breakpoint = get_breakpoint(breakpoints, index);
     if (breakpoint == NULL)
         return;
-    if (ptrace(PTRACE_POKEDATA, pid, (void *)breakpoint->address, (void *)breakpoint->previous_code) == -1)
+    long current_code = ptrace(PTRACE_PEEKDATA, pid, (void *)breakpoint->address, 0);
+    if (current_code == -1)
+    {
+        fprintf(stderr, "Cannot access memory at \x1b[34m0x%lx\x1b[0m\n", breakpoint->address);
+        return;
+    }
+    if (ptrace(PTRACE_POKEDATA, pid, (void *)breakpoint->address, (void *)((current_code & 0xFFFFFFFFFFFFFF00) | breakpoint->previous_code)) == -1)
         die("(pokedata) %s", strerror(errno));
     if (last_hit_breakpoint != NULL && breakpoint->address == last_hit_breakpoint->address)
         last_hit_breakpoint = NULL;
@@ -321,7 +337,7 @@ void set_breakpoint(pid_t pid, long addr, const char *symbol)
 
     // If symbol not given, try and find it
     symbol = (symbol != NULL) ? symbol : get_symbol(addr);
-    int index = add_breakpoint(breakpoints, addr, previous_code, symbol);
+    int index = add_breakpoint(breakpoints, addr, (unsigned char)(previous_code & 0xFF), symbol);
     if (index >= 0)
     {
         fprintf(stderr, "Breakpoint %d at \x1b[34m0x%lx\x1b[0m", index, addr);
@@ -413,7 +429,7 @@ void print_memory(pid_t pid, uint64_t start_address, uint64_t num_words)
         printf("0x%lx\t", start_address + i * WORD_LENGTH);
         uint32_t word = 0;
         for (int j = 0; j < WORD_LENGTH; j++)
-            word |= ((uint32_t)buffer[i * WORD_LENGTH + j]) << (j * 8);
+            word |= ((uint32_t)buffer[i * WORD_LENGTH + j] << (j * 8));
         printf("0x%x\n", word);
     }
     free(buffer);
@@ -540,7 +556,7 @@ pid_t load_child(char **argv)
     return pid;
 }
 
-char *get_command()
+char *get_input()
 {
     char *input = malloc(MAX_INPUT_SIZE * sizeof(char));
     while (1)
@@ -581,28 +597,6 @@ void clear_input_buffer()
         ;
 }
 
-int confirm_choice(char *dialog)
-{
-    char input = '\0';
-    while (1)
-    {
-        fprintf(stderr, "%s ", dialog);
-        fprintf(stderr, "(y or n) ");
-        if (scanf(" %c", &input) != 1)
-        {
-            clear_input_buffer();
-            continue;
-        }
-        if (input == 'y' || input == 'n')
-            break;
-
-        clear_input_buffer();
-        fprintf(stderr, "Please answer y or n.\n");
-    }
-    clear_input_buffer();
-    return input == 'y' ? 1 : 0;
-}
-
 int main(int argc, char **argv)
 {
     if (argc <= 1)
@@ -622,29 +616,19 @@ int main(int argc, char **argv)
     char **current_args = copy_args(argv);
     size_t args_size = argc;
     char *command = NULL;
+    char *input = NULL;
     while (1)
     {
-        command = get_command();
-        char *token = strtok(command, " ");
-        if (!strcmp(token, "r"))
+        command = get_input();
+        input = (char *)malloc(strlen(command) + 1);
+        strncpy(input, command, strlen(command));
+        input[strlen(command)] = '\0';
+        input_t *inputs = parse_input(input, child_state, &current_args, &args_size, pid);
+        if (inputs == NULL)
+            continue;
+        if (!strcmp(inputs->command, "r"))
         {
-            if (child_state == EXECUTING)
-            {
-                if (confirm_choice("The program being debugged has been started already.\nStart it from the beginning? "))
-                {
-                    if (*(command + strlen(token) + 1) != '\0')
-                        args_size = replace_args(command + strlen(token) + 1, &current_args);
-                    pid = reload_child(pid, current_args);
-                }
-                else
-                    continue;
-            }
-            else
-            {
-                if (*(command + strlen(token) + 1) != '\0')
-                    args_size = replace_args(command + strlen(token) + 1, &current_args);
-                pid = reload_child(pid, current_args);
-            }
+            pid = reload_child(pid, current_args);
             fprintf(stderr, "Starting program: \033[0;32m%s ", current_args[1]);
             for (int i = 2; i < args_size; i++)
                 fprintf(stderr, "%s ", current_args[i]);
@@ -653,7 +637,7 @@ int main(int argc, char **argv)
             if (execute(pid) == CHILD_EXIT)
                 child_state = EXITED;
         }
-        else if (!strcmp(token, "c"))
+        else if (!strcmp(inputs->command, "c"))
         {
             if (child_state != EXECUTING)
                 fprintf(stderr, "Program has not started or has finished\n");
@@ -663,70 +647,57 @@ int main(int argc, char **argv)
                     child_state = EXITED;
             }
         }
-        else if (!strcmp(token, "si"))
+        else if (!strcmp(inputs->command, "si"))
         {
             if (child_state != EXECUTING)
                 fprintf(stderr, "Program has not started or has finished\n");
             else
             {
-                char *error = NULL;
-                token = strtok(NULL, " ");
-                int steps = 1;
-                if (token != NULL)
-                {
-                    steps = strtol(token, &error, 10);
-                    if (*error != '\0')
-                    {
-                        fprintf(stderr, "Enter a valid number\n");
-                        continue;
-                    }
-                }
+                int steps = atoi(inputs->params[0]);
                 if (process_step(pid, steps) == CHILD_EXIT)
                     child_state = EXITED;
             }
         }
-        else if (!strcmp(token, "b"))
+        else if (!strcmp(inputs->command, "b"))
         {
             if (child_state == EXITED)
                 pid = reload_child(pid, current_args);
-            token = strtok(NULL, " "); // Get the next token
-            long address = 0;
-            if (token[0] == '*')
+            if (!strcmp(inputs->params[0], "address"))
             {
-                token = strtok(token, "*");
-                address = (long)strtol(token, NULL, 16);
+                long address = (long)strtol(inputs->params[1], NULL, 16);
                 set_breakpoint(pid, address, NULL);
+                continue;
             }
-            else
-            {
-                if (set_symbol_breakpoint(pid, token) == -1)
-                    fprintf(stderr, "Function \"%s\" not defined.\n", token);
-            }
+            if (set_symbol_breakpoint(pid, inputs->params[1]) == -1)
+                fprintf(stderr, "Function \"%s\" not defined.\n", inputs->params[1]);
         }
-        else if (!strcmp(token, "i"))
+        else if (!strcmp(inputs->command, "i"))
         {
-            token = strtok(NULL, " ");
-            if (!strcmp(token, "b"))
+            if (!strcmp(inputs->params[0], "b"))
                 print_list(breakpoints);
-            else if (!strcmp(token, "r"))
+            else if (!strcmp(inputs->params[0], "r"))
             {
                 if (child_state != EXECUTING)
                 {
+                    printf("Program has no registers now.\n");
                     printf("he program has no registers now.\n");
                     continue;
                 }
                 print_registers(pid);
             }
+            else
+            {
+                fprintf(stderr, "Invalid option\n");
+            }
         }
-        else if (!strcmp(token, "d"))
+        else if (!strcmp(inputs->command, "d"))
         {
-            token = strtok(NULL, " "); // Get the next token
-            if (token == NULL)
+            if (inputs->params == NULL)
                 child_state == EXITED ? remove_all_breakpoints(breakpoints) : clear_breakpoints(pid);
             else
             {
                 char *error = NULL;
-                int index = (int)strtol(token, &error, 10);
+                int index = (int)strtol(inputs->params[0], &error, 10);
                 if (*error != '\0')
                 {
                     fprintf(stderr, "Enter a valid number\n");
@@ -742,44 +713,18 @@ int main(int argc, char **argv)
                 delete_breakpoint(pid, index);
             }
         }
-        else if (token[0] == 'x')
+        else if (!strcmp(inputs->command, "x"))
         {
-            char *inner_token = token;
-            token = strtok(NULL, " ");
-            inner_token = strtok(inner_token, "/");
-            if (strcmp(inner_token, "x")) // Check that there is only 'x' before /
-            {
-                printf("Incorrect syntax\n");
+            if (!strcmp(inputs->params[0], "error"))
                 continue;
-            }
-            inner_token = strtok(NULL, "/");
-            if (inner_token == NULL) // Check that there is only 'x' before /
-            {
-                printf("Incorrect syntax\n");
-                continue;
-            }
-            int i = 0;
-            int words = 0;
-            while (i < strlen(inner_token) && inner_token[i] >= '0' && inner_token[i] <= '9')
-            {
-                if (words > 0)
-                    words *= 10;
-                words = words + (int)(inner_token[i] - '0');
-                i++;
-            }
-            if (words == 0 || i < strlen(inner_token))
-            {
-                printf("Incorrect syntax\n");
-                continue;
-            }
-            if (token == NULL)
-            {
-                printf("Incorrect syntax\n");
-                continue;
-            }
-
             char *error = NULL;
-            uint64_t start_address = strtol(token, &error, 16);
+            long words = strtol(inputs->params[0], &error, 10);
+            if (*error != '\0')
+            {
+                fprintf(stderr, "Enter a valid number\n");
+                continue;
+            }
+            long start_address = strtol(inputs->params[1], &error, 16);
             if (*error != '\0')
             {
                 fprintf(stderr, "Enter a valid address\n");
@@ -787,24 +732,17 @@ int main(int argc, char **argv)
             }
             print_memory(pid, start_address, words);
         }
-        else if (!strcmp(token, "disas"))
+        else if (!strcmp(inputs->command, "disas"))
         {
             disassemble_position(pid);
         }
-        else if (!strcmp(token, "quit"))
+        else if (!strcmp(inputs->command, "quit"))
         {
-            free(command);
-            char *dialog = malloc(100);
-            sprintf(dialog, "A debugging session is active.\n\n\tInferior 1 [process %d] will be killed.\n\nQuit anyway?", pid);
-            if (child_state == EXECUTING && !confirm_choice(dialog))
-            {
-                free(dialog);
+            if (inputs->params != NULL && !strcmp(inputs->params[0], "continue"))
                 continue;
-            }
-            free(dialog);
             break;
         }
-        else if (!strcmp(token, "clear"))
+        else if (!strcmp(inputs->command, "clear"))
         {
             fprintf(stderr, "\033[H\033[J");
             fflush(stderr);
